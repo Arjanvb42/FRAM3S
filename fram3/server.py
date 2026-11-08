@@ -1,0 +1,185 @@
+"""FRAM3 local server: serves the editor and the conversion/repair/scan API."""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import threading
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+
+from . import formats
+from .reconstruct import Job, Tools, run_job, PRESETS, VIDEO_EXT, PHOTO_EXT
+from .repair import RepairOptions, repair
+
+ROOT = Path(__file__).resolve().parent.parent
+WEB = ROOT / "web"
+DATA = Path(os.environ.get("FRAM3_DATA", Path.home() / ".local/share/fram3"))
+JOBS_DIR = DATA / "jobs"
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+MAX_UPLOAD = 4 * 1024**3  # 4 GB per file
+
+app = FastAPI(title="FRAM3")
+jobs: dict[str, Job] = {}
+
+
+def _err(e: Exception, code: int = 400):
+    raise HTTPException(status_code=code, detail=str(e))
+
+
+@app.get("/api/status")
+def status():
+    return {"formats": formats.available_formats(), "tools": Tools.detect().summary(),
+            "presets": list(PRESETS)}
+
+
+@app.post("/api/import")
+async def import_file(file: UploadFile = File(...)):
+    """Any supported file -> GLB the editor can show."""
+    data = await file.read()
+    try:
+        scene = formats.load(data, file.filename or "upload.bin")
+        glb = scene.export(file_type="glb")
+    except Exception as e:
+        _err(e)
+    return Response(glb, media_type="model/gltf-binary")
+
+
+@app.post("/api/export")
+async def export_file(file: UploadFile = File(...), to: str = Form(...), name: str = Form("model")):
+    """GLB from the editor -> any export format."""
+    to = to.lower().lstrip(".")
+    data = await file.read()
+    try:
+        out = formats.convert(data, "scene.glb", to, internal=True)
+    except Exception as e:
+        _err(e)
+    safe = "".join(c for c in name if c.isalnum() or c in "-_ ").strip() or "model"
+    return Response(out, media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{safe}.{to}"'})
+
+
+@app.post("/api/repair")
+async def repair_mesh(file: UploadFile = File(...), keep_largest: bool = Form(True),
+                      remove_floor: bool = Form(False), fill_holes: bool = Form(True),
+                      make_watertight: bool = Form(True), target_faces: int | None = Form(None),
+                      target_size_mm: float | None = Form(None), drop_to_bed: bool = Form(False)):
+    data = await file.read()
+    try:
+        scene = formats.load(data, "scene.glb", internal=True)
+        mesh = formats.scene_to_mesh(scene)
+        fixed, rep = repair(mesh, RepairOptions(keep_largest, remove_floor, fill_holes, make_watertight,
+                                                 target_faces or None, target_size_mm or None, drop_to_bed))
+        glb = fixed.export(file_type="glb")
+    except Exception as e:
+        _err(e)
+    return Response(glb, media_type="model/gltf-binary",
+                    headers={"X-Fram3-Report": json.dumps({"steps": rep.steps, "before": rep.before,
+                                                            "after": rep.after})})
+
+
+@app.post("/api/boolean")
+async def boolean_op(solids: UploadFile = File(...), holes: UploadFile | None = File(None)):
+    """Union of all meshes in `solids`, minus all meshes in `holes` (GLB from the editor)."""
+    from .repair import boolean
+    try:
+        def meshes(data: bytes):
+            return [g for g in formats.load(data, "scene.glb", internal=True).dump() if len(g.faces)]
+        sd = await solids.read()
+        hd = await holes.read() if holes is not None else None
+        if os.environ.get("FRAM3_DEBUG_DIR"):
+            Path(os.environ["FRAM3_DEBUG_DIR"], "solids.glb").write_bytes(sd)
+            if hd:
+                Path(os.environ["FRAM3_DEBUG_DIR"], "holes.glb").write_bytes(hd)
+        s = meshes(sd)
+        h = meshes(hd) if hd else []
+        result = boolean(s, h)
+        if not len(result.faces):
+            raise ValueError("Het resultaat is leeg: de gaten halen alles weg.")
+        glb = result.export(file_type="glb")
+    except Exception as e:
+        _err(e)
+    return Response(glb, media_type="model/gltf-binary")
+
+
+@app.post("/api/analyze")
+async def analyze(file: UploadFile = File(...)):
+    from .repair import stats
+    data = await file.read()
+    try:
+        mesh = formats.scene_to_mesh(formats.load(data, "scene.glb", internal=True))
+    except Exception as e:
+        _err(e)
+    return stats(mesh)
+
+
+@app.post("/api/scan")
+async def start_scan(files: list[UploadFile] = File(...), preset: str = Form("normaal")):
+    if preset not in PRESETS:
+        _err(ValueError(f"Onbekende kwaliteit: {preset}"))
+    jid = uuid.uuid4().hex[:10]
+    wd = JOBS_DIR / jid
+    (wd / "input").mkdir(parents=True)
+    paths = []
+    for f in files:
+        name = Path(f.filename or "file").name
+        if Path(name).suffix.lower() not in VIDEO_EXT | PHOTO_EXT:
+            continue
+        dst = wd / "input" / name
+        with dst.open("wb") as out:
+            shutil.copyfileobj(f.file, out, 1024 * 1024)
+        paths.append(dst)
+    if not paths:
+        shutil.rmtree(wd, ignore_errors=True)
+        _err(ValueError("Geen video's of foto's gevonden in de upload."))
+    job = Job(jid, wd, preset)
+    jobs[jid] = job
+    threading.Thread(target=run_job, args=(job, paths), daemon=True).start()
+    return job.public()
+
+
+@app.get("/api/scan/{jid}")
+def scan_status(jid: str):
+    job = jobs.get(jid) or _err(KeyError("Onbekende scan"), 404)
+    return job.public()
+
+
+@app.post("/api/scan/{jid}/cancel")
+def scan_cancel(jid: str):
+    job = jobs.get(jid) or _err(KeyError("Onbekende scan"), 404)
+    job.cancel()
+    return job.public()
+
+
+@app.get("/api/scan/{jid}/result")
+def scan_result(jid: str):
+    job = jobs.get(jid)
+    if not job or not job.result:
+        _err(KeyError("Nog geen resultaat"), 404)
+    return FileResponse(job.result, media_type="model/gltf-binary", filename=f"scan-{jid}.glb")
+
+
+app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
+
+
+def main():
+    import argparse
+    import uvicorn
+    ap = argparse.ArgumentParser(description="FRAM3 studio")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8733)
+    ap.add_argument("--no-browser", action="store_true")
+    a = ap.parse_args()
+    if not a.no_browser:
+        import webbrowser
+        threading.Timer(1.2, lambda: webbrowser.open(f"http://{a.host}:{a.port}")).start()
+    uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

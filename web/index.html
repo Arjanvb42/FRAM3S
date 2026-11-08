@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FRAM3</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2300b3a4'/%3E%3Cpath d='M9 23V9h12M9 16h9' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./vendor/addons/",
+        "three-mesh-bvh": "./vendor/three-mesh-bvh.js",
+        "three-bvh-csg": "./vendor/three-bvh-csg.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">F</span>FRAM3</div>
+    <nav class="tabs" role="tablist">
+      <button class="tab" data-tab="scan" role="tab">Scannen</button>
+      <button class="tab active" data-tab="edit" role="tab">Bewerken</button>
+    </nav>
+    <div class="top-actions">
+      <button id="btn-import" class="btn ghost" title="Bestand openen (Ctrl+O)">Openen</button>
+      <button id="btn-export" class="btn primary" title="Exporteren (Ctrl+E)">Exporteren</button>
+      <input id="file-import" type="file" multiple hidden>
+    </div>
+    <div class="tools-status" id="tools-status" title="Wat er op deze computer beschikbaar is"></div>
+  </header>
+
+  <main class="layout">
+    <!-- Left: scan panel or shapes + objects -->
+    <aside class="sidebar left">
+      <section class="panel" data-panel="scan" hidden>
+        <h2>Nieuwe scan</h2>
+        <p class="hint">Film rustig rondom het object (30–90 s), of maak 20–200 foto's van alle kanten. Zorg voor goed licht en een rustige achtergrond.</p>
+        <label class="dropzone" id="scan-drop">
+          <input type="file" id="scan-files" multiple accept="video/*,image/*" hidden>
+          <span class="dz-icon">⬆</span>
+          <span>Sleep video's en foto's hierheen<br><small>of klik om te kiezen</small></span>
+        </label>
+        <ul class="filelist" id="scan-list"></ul>
+        <div class="field">
+          <label for="scan-preset">Kwaliteit</label>
+          <select id="scan-preset">
+            <option value="snel">Snel (voorbeeld)</option>
+            <option value="normaal" selected>Normaal</option>
+            <option value="hoog">Hoog (langzaam)</option>
+          </select>
+        </div>
+        <button class="btn primary wide" id="scan-start" disabled>Scan starten</button>
+        <div class="scan-progress" id="scan-progress" hidden>
+          <div class="row"><strong id="scan-stage">…</strong><span id="scan-pct">0%</span></div>
+          <div class="bar"><div id="scan-bar"></div></div>
+          <button class="btn ghost small" id="scan-cancel">Annuleren</button>
+          <details><summary>Logboek</summary><pre id="scan-log"></pre></details>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="edit">
+        <h2>Vormen</h2>
+        <div class="shapes" id="shapes"></div>
+        <label class="toggle"><input type="checkbox" id="shape-hole"> Als gat toevoegen</label>
+        <h2>Objecten</h2>
+        <ul class="objlist" id="objlist"></ul>
+        <p class="hint" id="objlist-empty">Nog niets op het bed. Kies een vorm, open een bestand of start een scan.</p>
+      </section>
+    </aside>
+
+    <!-- Center: viewport -->
+    <section class="viewport" id="viewport">
+      <div class="vp-toolbar">
+        <div class="seg" id="gizmo-mode">
+          <button data-mode="translate" class="active" title="Verplaatsen (W)">↔</button>
+          <button data-mode="rotate" title="Draaien (E)">⟳</button>
+          <button data-mode="scale" title="Schalen (R)">⤢</button>
+        </div>
+        <div class="seg">
+          <button id="snap-toggle" class="active" title="Uitlijnen op raster">Snap 1 mm</button>
+        </div>
+        <div class="seg" id="views">
+          <button data-view="iso" title="Perspectief">3D</button>
+          <button data-view="top" title="Bovenaanzicht">Boven</button>
+          <button data-view="front" title="Vooraanzicht">Voor</button>
+          <button data-view="right" title="Zijaanzicht">Zij</button>
+          <button data-view="fit" title="Alles in beeld (F)">Passend</button>
+        </div>
+        <div class="seg">
+          <button id="undo" title="Ongedaan maken (Ctrl+Z)">↶</button>
+          <button id="redo" title="Opnieuw (Ctrl+Y)">↷</button>
+        </div>
+      </div>
+      <div class="drop-overlay" id="drop-overlay" hidden>Laat los om te openen</div>
+      <div class="toast" id="toast" hidden></div>
+    </section>
+
+    <!-- Right: properties -->
+    <aside class="sidebar right">
+      <section class="panel" id="props" hidden>
+        <h2 id="props-title">Object</h2>
+        <div class="field"><label for="p-name">Naam</label><input id="p-name" type="text"></div>
+        <div class="group-label">Positie (mm)</div>
+        <div class="xyz">
+          <label>X<input type="number" step="1" id="p-px"></label>
+          <label>Y<input type="number" step="1" id="p-py"></label>
+          <label>Z<input type="number" step="1" id="p-pz"></label>
+        </div>
+        <div class="group-label">Afmeting (mm) <label class="lock"><input type="checkbox" id="p-lock" checked> verhouding vast</label></div>
+        <div class="xyz">
+          <label>B<input type="number" step="0.5" min="0.01" id="p-sx"></label>
+          <label>D<input type="number" step="0.5" min="0.01" id="p-sy"></label>
+          <label>H<input type="number" step="0.5" min="0.01" id="p-sz"></label>
+        </div>
+        <div class="group-label">Rotatie (°)</div>
+        <div class="xyz">
+          <label>X<input type="number" step="15" id="p-rx"></label>
+          <label>Y<input type="number" step="15" id="p-ry"></label>
+          <label>Z<input type="number" step="15" id="p-rz"></label>
+        </div>
+        <div class="field row">
+          <label for="p-color">Kleur</label><input id="p-color" type="color">
+          <div class="seg small" id="p-kind">
+            <button data-kind="solid">Massief</button>
+            <button data-kind="hole">Gat</button>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="a-drop" title="Op het bed leggen (D)">Op bed</button>
+          <button class="btn" id="a-dup" title="Dupliceren (Ctrl+D)">Dupliceren</button>
+          <button class="btn" id="a-mirror" title="Spiegelen in X">Spiegelen</button>
+          <button class="btn" id="a-group" title="Samenvoegen: gaten worden uitgesneden (Ctrl+G)">Samenvoegen</button>
+          <button class="btn" id="a-repair" title="Repareren voor 3D-printen">Repareren</button>
+          <button class="btn danger" id="a-del" title="Verwijderen (Del)">Verwijderen</button>
+        </div>
+        <div class="stats" id="p-stats"></div>
+      </section>
+      <section class="panel" id="props-empty">
+        <h2>Eigenschappen</h2>
+        <p class="hint">Selecteer een object om de afmeting, positie en kleur aan te passen. Shift+klik voor meerdere objecten.</p>
+        <div class="shortcuts">
+          <div><kbd>W</kbd><kbd>E</kbd><kbd>R</kbd> verplaatsen / draaien / schalen</div>
+          <div><kbd>D</kbd> op het bed leggen</div>
+          <div><kbd>Ctrl</kbd>+<kbd>G</kbd> samenvoegen</div>
+          <div><kbd>Ctrl</kbd>+<kbd>D</kbd> dupliceren</div>
+          <div><kbd>Del</kbd> verwijderen</div>
+          <div><kbd>F</kbd> alles in beeld</div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span id="status-sel">Niets geselecteerd</span>
+    <span id="status-tris"></span>
+    <span class="spacer"></span>
+    <span>Bed 256 × 256 mm · eenheid mm</span>
+  </footer>
+
+  <!-- Export dialog -->
+  <dialog id="dlg-export">
+    <form method="dialog">
+      <h2>Exporteren</h2>
+      <div class="field"><label for="ex-name">Bestandsnaam</label><input id="ex-name" value="fram3-model"></div>
+      <div class="field"><label>Wat</label>
+        <div class="seg" id="ex-scope">
+          <button type="button" data-scope="all" class="active">Alles</button>
+          <button type="button" data-scope="sel">Selectie</button>
+        </div>
+      </div>
+      <div class="formats" id="ex-formats"></div>
+      <p class="hint" id="ex-note"></p>
+      <div class="dlg-actions">
+        <button value="cancel" class="btn ghost">Annuleren</button>
+        <button type="button" id="ex-go" class="btn primary">Downloaden</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Repair dialog -->
+  <dialog id="dlg-repair">
+    <form method="dialog">
+      <h2>Repareren voor printen</h2>
+      <label class="toggle"><input type="checkbox" id="r-largest" checked> Losse stukjes verwijderen</label>
+      <label class="toggle"><input type="checkbox" id="r-floor"> Ondergrond (tafel) wegsnijden</label>
+      <label class="toggle"><input type="checkbox" id="r-holes" checked> Gaten dichten</label>
+      <label class="toggle"><input type="checkbox" id="r-solid" checked> Waterdicht maken</label>
+      <div class="field"><label for="r-faces">Max. driehoeken (leeg = niet vereenvoudigen)</label><input id="r-faces" type="number" min="100" step="1000" placeholder="bijv. 200000"></div>
+      <div class="field"><label for="r-size">Grootste zijde in mm (leeg = zo laten)</label><input id="r-size" type="number" min="0.1" step="1" placeholder="bijv. 80"></div>
+      <div class="dlg-actions">
+        <button value="cancel" class="btn ghost">Annuleren</button>
+        <button type="button" id="r-go" class="btn primary">Repareren</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
