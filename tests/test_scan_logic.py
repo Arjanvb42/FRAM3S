@@ -18,7 +18,9 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
     (wd / "mvs").mkdir()
     obj = trimesh.creation.box((0.4, 0.6, 1.0)).subdivide().subdivide().subdivide()
     obj.apply_translation((0, 0, 0.5))
-    table = trimesh.creation.box((4, 4, 0.05)).subdivide().subdivide().subdivide()
+    table = trimesh.creation.box((4, 4, 0.05)).subdivide().subdivide().subdivide().subdivide()
+    if fragment:   # wrinkled like a real scan: face normals scatter by ~10 degrees
+        table.vertices[:, 2] += np.random.default_rng(seed).normal(0, 0.03, len(table.vertices))
     table.apply_translation((0, 0, -0.025))
     wall = trimesh.creation.box((6, 0.1, 3))
     wall.apply_translation((0, 5, 1.5))
@@ -53,10 +55,10 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
 
 
 def test_cleanup_upright_without_table():
-    for seed, frag in ((1, False), (2, False), (3, True), (4, True)):
+    for seed, frag, tilt in ((1, False, 8), (2, False, 21), (3, True, 8), (4, True, 21)):
         wd = Path(tempfile.mkdtemp())
         try:
-            fake_scan(wd, seed, fragment=frag)
+            fake_scan(wd, seed, fragment=frag, tilt_deg=tilt)
             job = Job("t", wd, "snel")
             out = Reconstructor(job, [], Tools(None, None, False)).cleanup(wd / "mvs" / "scene_textured.obj")
             g = trimesh.load(out, force="scene").dump()[0]

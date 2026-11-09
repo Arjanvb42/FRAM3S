@@ -127,34 +127,74 @@ def proximity_labels(points: np.ndarray, cell: float) -> np.ndarray:
     return lab[tuple(ijk.T)]
 
 
-def table_tilt(mesh, max_angle_deg: float = 25.0) -> np.ndarray:
-    """Small rotation that makes the table plane exactly horizontal.
+def table_plane(mesh, max_angle_deg: float = 30.0, iters: int = 300):
+    """Find the table the object stands on: the plane, roughly facing up, that
+    carries the most surface area. Fitted on face positions (RANSAC + least
+    squares), because the normals of a scanned table are noisy.
 
-    Camera-based 'up' is only roughly right (people tilt the phone). The table
-    or floor the object stands on is the best level reference, so take the
-    dominant direction of the large flat surfaces (normals near up) of an
-    already roughly upright mesh. Returns identity when there is no clear table.
+    Returns (normal, offset, thickness) with normal . p = offset on the plane
+    and thickness the spread of the table faces around it, or None.
     """
-    M = np.eye(4)
     n = mesh.face_normals
     a = mesh.area_faces
+    c = mesh.triangles_center
     total = a.sum()
-    normal = np.array([0.0, 0.0, 1.0])
-    # Mean shift on the face normals: the table top (and any other level
-    # surface) forms the biggest cluster of normals near 'up'. Narrowing the
-    # cone each round pulls the estimate onto that cluster and away from
-    # sloped parts of the object.
-    for cone in (max_angle_deg, 15.0, 8.0, 4.0, 4.0):
-        sel = n @ normal > np.cos(np.radians(cone))
-        if sel.sum() < 30:
-            return M
-        new = (n[sel] * a[sel, None]).sum(0)
-        normal = new / np.linalg.norm(new)
-    if a[n @ normal > np.cos(np.radians(4.0))].sum() < 0.15 * total:
-        return M   # no big flat surface: trust the cameras
-    if np.degrees(np.arccos(min(1.0, normal[2]))) > max_angle_deg:
-        return M
-    return _rotation_to_z(normal)
+    cand = np.nonzero(n[:, 2] > np.cos(np.radians(max_angle_deg + 10)))[0]
+    if len(cand) < 50:
+        return None
+    diag = float(np.linalg.norm(np.ptp(c, axis=0)))
+    tol = 0.01 * diag
+    rng = np.random.default_rng(0)
+    p_pick = a[cand] / a[cand].sum()
+    cc, ac = c[cand], a[cand]
+    best, best_area = None, 0.0
+    cos_max = np.cos(np.radians(max_angle_deg))
+    for _ in range(iters):
+        i = rng.choice(cand, 3, replace=False, p=p_pick)
+        nrm = np.cross(c[i[1]] - c[i[0]], c[i[2]] - c[i[0]])
+        L = np.linalg.norm(nrm)
+        if L < 1e-12:
+            continue
+        nrm /= L
+        if nrm[2] < 0:
+            nrm = -nrm
+        if nrm[2] < cos_max:
+            continue
+        ar = ac[np.abs((cc - c[i[0]]) @ nrm) < tol].sum()
+        if ar > best_area:
+            best, best_area = (nrm, float(c[i[0]] @ nrm)), ar
+    if best is None or best_area < 0.15 * total:
+        return None
+    nrm, off = best
+    for _ in range(3):   # refine with a weighted least-squares plane through the inliers
+        inl = cand[np.abs(c[cand] @ nrm - off) < tol]
+        if len(inl) < 10:
+            return None
+        w = a[inl]
+        mu = np.average(c[inl], axis=0, weights=w)
+        cov = ((c[inl] - mu) * w[:, None]).T @ (c[inl] - mu)
+        nrm = np.linalg.eigh(cov)[1][:, 0]
+        if nrm[2] < 0:
+            nrm = -nrm
+        off = float(mu @ nrm)
+    if nrm[2] < cos_max:
+        return None
+    dist = c[inl] @ nrm - off
+    thickness = float(np.sqrt(np.average(dist ** 2, weights=a[inl])))
+    return nrm, off, thickness
+
+
+def table_tilt(mesh, max_angle_deg: float = 30.0) -> np.ndarray:
+    """Small rotation that makes the table plane exactly horizontal.
+
+    Camera-based 'up' is only roughly right (people tilt the phone), the table
+    the object stands on is the best level reference. Returns identity when
+    there is no clear table.
+    """
+    plane = table_plane(mesh, max_angle_deg)
+    if plane is None:
+        return np.eye(4)
+    return _rotation_to_z(plane[0])
 
 
 def _rotation_to_z(v: np.ndarray) -> np.ndarray:
@@ -193,20 +233,21 @@ def object_mask(mesh, orbit_center_xy: np.ndarray, orbit_radius: float,
         info["outside_removed"] = int((~inside).sum())
         keep &= inside
 
-    # 2. The table: the height that holds the most horizontal surface area.
+    # 2. The table: the dominant up-facing plane low in the scan. Cut it and
+    #    everything under it, with a margin for its bumpiness.
     if remove_floor:
-        horiz = (normals[:, 2] > 0.85) & keep   # the surface it stands on faces up
-        if horiz.sum() > 50:
-            z = centers[horiz, 2]
-            lo, hi = np.percentile(centers[keep, 2], [1, 99])
-            bins = np.linspace(lo, hi, 80)
-            hist, edges = np.histogram(z, bins=bins, weights=areas[horiz])
-            i = int(np.argmax(hist))
-            # only treat it as a table if that layer is low and substantial
-            if i < len(hist) * 0.5 and hist[i] > 0.15 * areas[keep].sum():
-                floor_z = (edges[i] + edges[i + 1]) / 2
-                tol = (hi - lo) * 0.015
-                below = centers[:, 2] < floor_z + tol
+        sub = mesh.submesh([np.nonzero(keep)[0]], append=True) if not keep.all() else mesh
+        plane = table_plane(sub)
+        if plane is not None:
+            nrm, off, thick = plane
+            zs = centers[keep, 2]
+            lo, hi = np.percentile(zs, [1, 99])
+            height = hi - lo
+            floor_z = off / nrm[2] if abs(nrm[0]) + abs(nrm[1]) < 0.2 else None
+            if floor_z is not None and floor_z < lo + 0.5 * height:
+                tol = max(0.015 * height, 2.5 * thick)
+                d = centers @ nrm - off
+                below = d < tol
                 info["floor_removed"] = int((below & keep).sum())
                 keep &= ~below
                 info["floor_z"] = float(floor_z)
