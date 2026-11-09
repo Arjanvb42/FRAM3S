@@ -10,6 +10,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fram3.reconstruct import Job, Reconstructor, Tools  # noqa: E402
+from fram3 import reconstruct as R  # noqa: E402
 
 
 def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8.0, fragment: bool = False,
@@ -94,6 +95,8 @@ def test_cleanup_upright_without_table():
 
 def test_low_registration_fails_clearly():
     wd = Path(tempfile.mkdtemp())
+    real = R._images_with_features
+    R._images_with_features = lambda db: 50
     try:
         imgs = wd / "images"
         imgs.mkdir()
@@ -125,10 +128,52 @@ def test_low_registration_fails_clearly():
         r3.sparse(imgs, sequential=False)
         assert job3.warning is None and r3.registered == (45, 50)
     finally:
+        R._images_with_features = real
+        shutil.rmtree(wd)
+
+
+def test_gpu_out_of_memory_falls_back_to_cpu():
+    wd = Path(tempfile.mkdtemp())
+    real = R._images_with_features, R._gpu_mem_mib
+    try:
+        imgs = wd / "images"
+        imgs.mkdir()
+        for i in range(20):
+            Image.new("RGB", (1800, 3200)).save(imgs / f"{i:03}.jpg")
+        state = {"n": 0}
+        R._images_with_features = lambda db: state["n"]
+        R._gpu_mem_mib = lambda: 4096
+        runs = []
+
+        def colmap(*a, **k):
+            if a[0] == "feature_extractor":
+                use_gpu = a[a.index("--SiftExtraction.use_gpu") + 1]
+                runs.append((use_gpu, "--SiftExtraction.max_image_size" in a))
+                if use_gpu == "1":
+                    raise RuntimeError("CuTexImage::BindTexture: out of memory")
+                state["n"] = 20
+        job = Job("g", wd, "hoog")
+        r = Reconstructor(job, [], Tools(None, None, True))
+        r.colmap = colmap
+        r.map = lambda *a, **k: (wd, 20)
+        r.sparse(imgs, sequential=False)
+        assert runs == [("1", True), ("0", False)], runs
+        # nothing found at all: a clear message, no stack trace from the matcher
+        state["n"] = 0
+        r.colmap = lambda *a, **k: None
+        try:
+            r.sparse(imgs, sequential=False)
+        except RuntimeError as e:
+            assert "herkenningspunten" in str(e)
+        else:
+            raise AssertionError("expected a clear error")
+    finally:
+        R._images_with_features, R._gpu_mem_mib = real
         shutil.rmtree(wd)
 
 
 if __name__ == "__main__":
     test_cleanup_upright_without_table()
     test_low_registration_fails_clearly()
+    test_gpu_out_of_memory_falls_back_to_cpu()
     print("ok")

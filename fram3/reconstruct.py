@@ -375,11 +375,33 @@ class Reconstructor:
             # to find enough features on small, soft frames.
             extra = ["--SiftExtraction.peak_threshold", "0.004", "--SiftExtraction.max_num_features", "12000"]
             self.log("  Kleine beelden: gevoeligere kenmerkdetectie")
-        self.colmap("feature_extractor", "--database_path", str(db), "--image_path", str(images),
-                    "--ImageReader.single_camera", "1" if sequential else "0",
-                    "--ImageReader.camera_model", "OPENCV",
-                    "--SiftExtraction.use_gpu", gpu, *extra,
-                    on_line=self.counter("features", r"Processed file \[(\d+)/(\d+)\]"))
+        def extract(use_gpu: str, more: list[str]):
+            self.colmap("feature_extractor", "--database_path", str(db), "--image_path", str(images),
+                        "--ImageReader.single_camera", "1" if sequential else "0",
+                        "--ImageReader.camera_model", "OPENCV",
+                        "--SiftExtraction.use_gpu", use_gpu, *extra, *more,
+                        on_line=self.counter("features", r"Processed file \[(\d+)/(\d+)\]"))
+
+        cap = []
+        if gpu == "1" and _gpu_mem_mib() <= 4500:
+            # Kenmerken zoeken op de GPU past bij 4 GB niet boven ~2400 px. Het
+            # dichte model gebruikt daarna gewoon de volle beelden.
+            cap = ["--SiftExtraction.max_image_size", "2400"]
+        try:
+            extract(gpu, cap)
+        except Cancelled:
+            raise
+        except Exception as e:
+            if gpu != "1":
+                raise
+            self.log(f"Kenmerken zoeken op de GPU mislukt ({str(e)[:80]})")
+        if gpu == "1" and _images_with_features(db) < 0.9 * n_imgs:
+            self.log("  Te weinig geheugen op de GPU: kenmerken zoeken op de processor (trager)")
+            db.unlink(missing_ok=True)
+            extract("0", [])
+        if _images_with_features(db) < max(3, 0.3 * n_imgs):
+            raise RuntimeError("In de beelden zijn geen herkenningspunten gevonden. "
+                               "Zijn ze scherp en goed belicht?")
         self.stage("matching")
         exhaustive = not (sequential and n_imgs > 120)
         self.match(db, gpu, exhaustive)
@@ -696,6 +718,27 @@ def _has_filter(name: str) -> bool:
 
 def _has_decoder(codec: str) -> bool:
     return any(len(l.split()) > 1 and l.split()[1] == codec for l in _ff_list("decoders").splitlines())
+
+
+def _gpu_mem_mib() -> int:
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True).stdout
+        return int(out.split()[0])
+    except Exception:
+        return 0
+
+
+def _images_with_features(db: Path) -> int:
+    import sqlite3
+    try:
+        con = sqlite3.connect(db)
+        try:
+            return con.execute("SELECT COUNT(*) FROM keypoints WHERE rows > 0").fetchone()[0]
+        finally:
+            con.close()
+    except Exception:
+        return 0
 
 
 def _probe_video(video: Path) -> dict:
