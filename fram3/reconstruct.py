@@ -84,10 +84,35 @@ class Job:
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _proc: subprocess.Popen | None = field(default=None, repr=False)
 
+    def save(self):
+        """Persist enough to list and resume this job after a restart."""
+        try:
+            (self.workdir / "job.json").write_text(json.dumps({
+                "id": self.id, "preset": self.preset, "status": self.status, "stage": self.stage,
+                "progress": self.progress, "error": self.error, "result": self.result}))
+        except OSError:
+            pass
+
+    @staticmethod
+    def load(workdir: Path) -> "Job":
+        info = json.loads((workdir / "job.json").read_text())
+        job = Job(info["id"], workdir, info.get("preset", "normaal"))
+        job.status, job.stage = info.get("status", "fout"), info.get("stage", "")
+        job.progress, job.error, job.result = info.get("progress", 0.0), info.get("error"), info.get("result")
+        if job.status in ("bezig", "wachtrij"):
+            # The server stopped (laptop off, crash) while this ran.
+            job.status, job.error = "onderbroken", "De scan is onderbroken. Je kunt hem hervatten."
+        if job.result and not Path(job.result).exists():
+            job.result = None
+        return job
+
+    def inputs(self) -> list[Path]:
+        return sorted(p for p in (self.workdir / "input").glob("*") if p.is_file())
+
     def public(self) -> dict:
         return {"id": self.id, "status": self.status, "stage": self.stage,
                 "progress": round(self.progress, 3), "log": self.log[-200:],
-                "error": self.error, "has_result": self.result is not None}
+                "error": self.error, "has_result": self.result is not None, "preset": self.preset}
 
     def cancel(self):
         self._cancel.set()
@@ -130,6 +155,7 @@ class Reconstructor:
         if self.job.stage != STAGE_NL[name]:
             self.job.stage = STAGE_NL[name]
             self.log(f"== {STAGE_NL[name]} ==")
+            self.job.save()
 
     def run(self, cmd: list[str], cwd: Path | None = None, on_line: Callable[[str], None] | None = None):
         if self.job._cancel.is_set():
@@ -181,13 +207,23 @@ class Reconstructor:
 
     # ------------------------------------------------------------- pipeline
     def execute(self) -> Path:
+        """Run the pipeline. Stages whose output already exists in the job folder
+        (from an interrupted run) are skipped, so a scan can be resumed."""
         images = self.w / "images"
-        images.mkdir(parents=True, exist_ok=True)
-        n = self.collect_frames(images)
-        if n < 8:
-            raise RuntimeError(f"Te weinig bruikbare beelden ({n}). Film rustig rondom het object, minstens 20 beelden.")
-        self.log(f"{n} beelden klaar voor reconstructie")
-        self.sparse(images, sequential=self.has_video())
+        sparse_done = (self.w / "dense" / "sparse").is_dir() and (self.w / "dense" / "images").is_dir()
+        if sparse_done:
+            self.log("Hervatten: frames en camera's zijn al klaar")
+        else:
+            shutil.rmtree(images, ignore_errors=True)
+            for d in ("sparse", "dense"):
+                shutil.rmtree(self.w / d, ignore_errors=True)
+            (self.w / "colmap.db").unlink(missing_ok=True)
+            images.mkdir(parents=True, exist_ok=True)
+            n = self.collect_frames(images)
+            if n < 8:
+                raise RuntimeError(f"Te weinig bruikbare beelden ({n}). Film rustig rondom het object, minstens 20 beelden.")
+            self.log(f"{n} beelden klaar voor reconstructie")
+            self.sparse(images, sequential=self.has_video())
         mesh = self.dense_and_mesh()
         return self.cleanup(mesh)
 
@@ -298,15 +334,24 @@ class Reconstructor:
         mvs = self.w / "mvs"
         mvs.mkdir(exist_ok=True)
         self.stage("dense")
-        self.mvs("InterfaceCOLMAP", "-i", str(self.w / "dense"), "-o", "scene.mvs",
-                 "--image-folder", str(self.w / "dense" / "images"))
-        self.mvs("DensifyPointCloud", "scene.mvs", "--resolution-level", str(self.p["mvs_level"]),
-                 "--max-threads", "0")
+        # Each step is skipped when its output exists (resume). DensifyPointCloud also
+        # reuses depth maps (*.dmap) that an interrupted run already computed.
+        if not (mvs / "scene.mvs").exists():
+            self.mvs("InterfaceCOLMAP", "-i", str(self.w / "dense"), "-o", "scene.mvs",
+                     "--image-folder", str(self.w / "dense" / "images"))
+        if not (mvs / "scene_dense.mvs").exists():
+            done = len(list(mvs.glob("*.dmap")))
+            if done:
+                self.log(f"Hervatten: {done} dieptekaarten waren al klaar")
+            self.mvs("DensifyPointCloud", "scene.mvs", "--resolution-level", str(self.p["mvs_level"]),
+                     "--max-threads", "0")
         self.stage("mesh")
-        self.mvs("ReconstructMesh", "scene_dense.mvs", "-p", "scene_dense.ply", "-o", "scene_mesh.mvs")
+        if not (mvs / "scene_mesh.ply").exists():
+            self.mvs("ReconstructMesh", "scene_dense.mvs", "-p", "scene_dense.ply", "-o", "scene_mesh.mvs")
         self.stage("texture")
-        self.mvs("TextureMesh", "scene_dense.mvs", "-m", "scene_mesh.ply", "-o", "scene_textured.mvs",
-                 "--export-type", "obj", "--resolution-level", str(self.p["mvs_level"]))
+        if not (mvs / "scene_textured.obj").exists():
+            self.mvs("TextureMesh", "scene_dense.mvs", "-m", "scene_mesh.ply", "-o", "scene_textured.mvs",
+                     "--export-type", "obj", "--resolution-level", str(self.p["mvs_level"]))
         for cand in ("scene_textured.obj", "scene_textured.ply", "scene_mesh.ply"):
             if (mvs / cand).exists():
                 return mvs / cand
@@ -374,7 +419,8 @@ class Reconstructor:
 
 
 def run_job(job: Job, inputs: list[Path], tools: Tools | None = None):
-    job.status = "bezig"
+    job.status, job.error = "bezig", None
+    job.save()
     try:
         job.result = str(Reconstructor(job, inputs, tools).execute())
         job.status, job.stage = "klaar", "Klaar"
@@ -385,6 +431,8 @@ def run_job(job: Job, inputs: list[Path], tools: Tools | None = None):
     except Exception as e:  # noqa: BLE001 - shown to the user
         job.status, job.error = "fout", str(e)
         job.log.append(f"FOUT: {e}")
+    finally:
+        job.save()
 
 
 # ------------------------------------------------------------------ helpers

@@ -664,6 +664,41 @@ $('scan-start').onclick = async () => {
   }
 };
 
+const STATUS_NL = { klaar: 'klaar', fout: 'mislukt', geannuleerd: 'geannuleerd', onderbroken: 'onderbroken', bezig: 'bezig', wachtrij: 'wachtrij' };
+async function loadScanHistory() {
+  let list = [];
+  try { list = await (await fetch('/api/scans')).json(); } catch { return; }
+  const ul = $('scan-history-list');
+  ul.innerHTML = '';
+  $('scan-history').hidden = !list.length;
+  for (const j of list) {
+    const li = document.createElement('li');
+    const name = (j.files || [])[0] || j.id;
+    li.innerHTML = `<span><span class="nm"></span><span class="meta">${STATUS_NL[j.status] || j.status} · ${Math.round(j.progress * 100)}% · ${j.preset}</span></span>`;
+    li.querySelector('.nm').textContent = name + ((j.files || []).length > 1 ? ` +${j.files.length - 1}` : '');
+    const btn = document.createElement('button');
+    btn.className = 'btn small';
+    if (j.status === 'klaar' && j.has_result) {
+      btn.textContent = 'Openen';
+      btn.onclick = async () => { switchTab('edit'); await addGlb(await (await fetch(`/api/scan/${j.id}/result`)).arrayBuffer(), 'Scan'); };
+    } else if (['onderbroken', 'fout', 'geannuleerd'].includes(j.status)) {
+      btn.textContent = 'Hervatten';
+      btn.title = j.error || '';
+      btn.onclick = async () => {
+        const r = await fetch(`/api/scan/${j.id}/resume`, { method: 'POST' });
+        if (!r.ok) return toast((await r.json()).detail, true);
+        $('scan-progress').hidden = false;
+        pollScan(j.id);
+      };
+    } else if (j.status === 'bezig') {
+      btn.textContent = 'Volgen';
+      btn.onclick = () => { $('scan-progress').hidden = false; pollScan(j.id); };
+    } else continue;
+    li.append(btn);
+    ul.append(li);
+  }
+}
+
 function pollScan(id) {
   clearInterval(scanPoll);
   $('scan-cancel').onclick = () => fetch(`/api/scan/${id}/cancel`, { method: 'POST' });
@@ -676,8 +711,9 @@ function pollScan(id) {
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 10;
     log.textContent = j.log.join('\n');
     if (atBottom) log.scrollTop = log.scrollHeight;
-    if (['klaar', 'fout', 'geannuleerd'].includes(j.status)) {
+    if (['klaar', 'fout', 'geannuleerd', 'onderbroken'].includes(j.status)) {
       clearInterval(scanPoll);
+      loadScanHistory();
       $('scan-start').disabled = !scanFiles.length;
       if (j.status === 'klaar') {
         const buf = await (await fetch(`/api/scan/${id}/result`)).arrayBuffer();
@@ -851,6 +887,7 @@ $('snap-toggle').onclick = (e) => {
 // ---------------------------------------------------------------- tabs
 document.querySelectorAll('.tab').forEach((t) => (t.onclick = () => switchTab(t.dataset.tab)));
 function switchTab(name) {
+  if (name === 'scan') loadScanHistory();
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('[data-panel]').forEach((p) => (p.hidden = p.dataset.panel !== name));
 }
@@ -928,6 +965,13 @@ async function loadStatus() {
   }
 }
 loadStatus();
+loadScanHistory().then(async () => {
+  // A scan that is still running (e.g. after reopening the page): follow it.
+  try {
+    const running = (await (await fetch('/api/scans')).json()).find((j) => j.status === 'bezig');
+    if (running) { switchTab('scan'); $('scan-progress').hidden = false; pollScan(running.id); }
+  } catch {}
+});
 commit();
 refreshPanels();
 

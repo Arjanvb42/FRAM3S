@@ -28,6 +28,28 @@ app = FastAPI(title="FRAM3")
 jobs: dict[str, Job] = {}
 
 
+def _load_jobs():
+    """Pick up scans from earlier runs, so interrupted ones can be resumed."""
+    for d in sorted(JOBS_DIR.iterdir()) if JOBS_DIR.exists() else []:
+        try:
+            if (d / "job.json").exists():
+                jobs[d.name] = Job.load(d)
+            elif (d / "input").is_dir():
+                # Scan from a version without job.json: done if result.glb exists, else interrupted.
+                job = Job(d.name, d, os.environ.get("FRAM3_RESUME_PRESET", "normaal"))
+                if (d / "result.glb").exists():
+                    job.status, job.result, job.progress, job.stage = "klaar", str(d / "result.glb"), 1.0, "Klaar"
+                else:
+                    job.status, job.error = "onderbroken", "De scan is onderbroken. Je kunt hem hervatten."
+                job.save()
+                jobs[d.name] = job
+        except Exception:
+            pass
+
+
+_load_jobs()
+
+
 def _err(e: Exception, code: int = 400):
     raise HTTPException(status_code=code, detail=str(e))
 
@@ -138,6 +160,7 @@ async def start_scan(files: list[UploadFile] = File(...), preset: str = Form("no
         shutil.rmtree(wd, ignore_errors=True)
         _err(ValueError("Geen video's of foto's gevonden in de upload."))
     job = Job(jid, wd, preset)
+    job.save()
     jobs[jid] = job
     threading.Thread(target=run_job, args=(job, paths), daemon=True).start()
     return job.public()
@@ -146,6 +169,28 @@ async def start_scan(files: list[UploadFile] = File(...), preset: str = Form("no
 @app.get("/api/scan/{jid}")
 def scan_status(jid: str):
     job = jobs.get(jid) or _err(KeyError("Onbekende scan"), 404)
+    return job.public()
+
+
+@app.get("/api/scans")
+def scan_list():
+    out = []
+    for jid, job in sorted(jobs.items(), key=lambda kv: kv[1].workdir.stat().st_mtime, reverse=True):
+        out.append(job.public() | {"files": [p.name for p in job.inputs()]})
+    return out[:20]
+
+
+@app.post("/api/scan/{jid}/resume")
+def scan_resume(jid: str):
+    job = jobs.get(jid) or _err(KeyError("Onbekende scan"), 404)
+    if job.status == "bezig":
+        return job.public()
+    inputs = job.inputs()
+    if not inputs:
+        _err(ValueError("De originele video/foto's van deze scan zijn er niet meer."))
+    job._cancel.clear()
+    job.log.append("== Hervatten ==")
+    threading.Thread(target=run_job, args=(job, inputs), daemon=True).start()
     return job.public()
 
 
