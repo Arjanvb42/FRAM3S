@@ -218,6 +218,21 @@ class Reconstructor:
         (from an interrupted run) are skipped, so a scan can be resumed."""
         images = self.w / "images"
         sparse_done = (self.w / "dense" / "sparse").is_dir() and (self.w / "dense" / "images").is_dir()
+        if sparse_done and images.is_dir():
+            # Do not resume on a camera model from an older version that placed
+            # only a few of the frames: that never gives a usable scan.
+            from .align import read_cameras
+            try:
+                placed = len(read_cameras(self.w / "dense" / "sparse")[0])
+            except Exception:
+                placed = 0
+            total = len(list(images.iterdir()))
+            if total and placed < 0.3 * total:
+                self.log(f"Vorige poging plaatste maar {placed} van {total} beelden: opnieuw vanaf het begin")
+                sparse_done = False
+                for f in (self.w / "mvs").glob("*") if (self.w / "mvs").is_dir() else []:
+                    if f.is_file():
+                        f.unlink()
         if sparse_done:
             self.log("Hervatten: frames en camera's zijn al klaar")
         else:
