@@ -91,7 +91,7 @@ def test_low_registration_fails_clearly():
         r = Reconstructor(job, [], Tools(None, None, False))
         calls = []
         r.colmap = lambda *a, **k: calls.append(a[0])
-        r.map = lambda *a: (wd, 9)
+        r.map = lambda *a, **k: (wd, 9)
         try:
             r.sparse(imgs, sequential=False)
         except RuntimeError as e:
@@ -102,9 +102,16 @@ def test_low_registration_fails_clearly():
         job2 = Job("u", wd, "snel")
         r2 = Reconstructor(job2, [], Tools(None, None, False))
         r2.colmap = lambda *a, **k: None
-        r2.map = lambda *a: (wd, 25)
+        r2.map = lambda *a, **k: (wd, 25)
         r2.sparse(imgs, sequential=False)
         assert job2.warning and "25 van de 50" in job2.warning
+        # the relaxed retry is used when it places more images
+        job3 = Job("v", wd, "snel")
+        r3 = Reconstructor(job3, [], Tools(None, None, False))
+        r3.colmap = lambda *a, **k: None
+        r3.map = lambda *a, relaxed=False: (wd, 45 if relaxed else 2)
+        r3.sparse(imgs, sequential=False)
+        assert job3.warning is None and r3.registered == (45, 50)
     finally:
         shutil.rmtree(wd)
 

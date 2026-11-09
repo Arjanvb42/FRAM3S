@@ -361,12 +361,23 @@ class Reconstructor:
             sp.mkdir()
             self.stage("sparse")
             model, registered = self.map(db, images, sp, n_imgs)
+        if registered < 0.6 * n_imgs:
+            # No good starting pair: common with soft phone video and flat
+            # scenes. A less strict start (smaller angle, fewer matches) lets the
+            # mapper begin and then add the other images normally.
+            self.log(f"Maar {registered} van {n_imgs} beelden geplaatst: opnieuw met soepelere start")
+            shutil.rmtree(sp, ignore_errors=True)
+            sp.mkdir()
+            self.stage("sparse")
+            model2, reg2 = self.map(db, images, sp, n_imgs, relaxed=True)
+            if reg2 > registered:
+                model, registered = model2, reg2
         self.registered = (registered, n_imgs)
         if registered < max(8, 0.3 * n_imgs):
             raise RuntimeError(
                 f"Maar {registered} van de {n_imgs} beelden konden geplaatst worden, te weinig voor een goed model. "
-                "Film rustiger en helemaal rondom het object, met genoeg licht, en gebruik de originele video "
-                "(niet via WhatsApp, die maakt hem kleiner en waziger).")
+                "Probeer de originele video (niet via WhatsApp, die maakt hem kleiner en waziger), "
+                "film helemaal rondom het object met genoeg licht, of kies een andere kwaliteit.")
         if registered < 0.6 * n_imgs:
             self.job.warning = (f"Maar {registered} van de {n_imgs} beelden gebruikt: het model kan gaten hebben. "
                                 "Film voor een beter resultaat helemaal rondom het object.")
@@ -386,10 +397,11 @@ class Reconstructor:
                         "--SiftMatching.use_gpu", gpu,
                         on_line=self.counter("matching", r"Matching image \[(\d+)/(\d+)\]"))
 
-    def map(self, db: Path, images: Path, sp: Path, n_imgs: int) -> tuple[Path, int]:
+    def map(self, db: Path, images: Path, sp: Path, n_imgs: int, relaxed: bool = False) -> tuple[Path, int]:
         # "Registering image #12 (7)": the number in brackets is how many images are placed so far.
+        extra = ["--Mapper.init_min_tri_angle", "4", "--Mapper.init_min_num_inliers", "50"] if relaxed else []
         self.colmap("mapper", "--database_path", str(db), "--image_path", str(images),
-                    "--output_path", str(sp),
+                    "--output_path", str(sp), *extra,
                     on_line=self.counter("sparse", r"Registering image #\d+ \((\d+)\)", total=n_imgs))
         from .align import read_cameras
         best, best_n = None, 0
