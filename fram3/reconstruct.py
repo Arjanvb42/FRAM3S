@@ -294,21 +294,52 @@ class Reconstructor:
 
     # 4. cleanup ---------------------------------------------------------------
     def cleanup(self, mesh_path: Path) -> Path:
+        """Orient Z-up, drop floating debris and put the scan on the bed, keeping the texture."""
         import trimesh
-        from .repair import RepairOptions, repair
+        from .repair import stats
         self.stage("cleanup")
         scene = trimesh.load(str(mesh_path), force="scene")
-        geoms = [g for g in scene.dump() if isinstance(g, trimesh.Trimesh)]
-        mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
+        geoms = [g for g in scene.dump() if isinstance(g, trimesh.Trimesh) and len(g.faces)]
+        if not geoms:
+            raise RuntimeError("De reconstructie leverde een lege mesh op.")
+        before = [stats(g) for g in geoms]
         # COLMAP is Y-down/Z-forward; the editor and slicers are Z-up.
-        mesh.apply_transform(trimesh.transformations.rotation_matrix(-math.pi / 2, [1, 0, 0]))
-        cleaned, rep = repair(mesh, RepairOptions(keep_largest=True, remove_floor=False, fill_holes=False,
-                                                   make_watertight=False, drop_to_bed=True))
-        for s in rep.steps:
-            self.log("  " + s)
+        rot = trimesh.transformations.rotation_matrix(-math.pi / 2, [1, 0, 0])
+        for g in geoms:
+            g.apply_transform(rot)
+        # Debris: face components much smaller than the whole scan. Masking faces
+        # (instead of splitting/merging meshes) keeps UVs and the texture intact.
+        lo = np.min([g.bounds[0] for g in geoms], axis=0)
+        hi = np.max([g.bounds[1] for g in geoms], axis=0)
+        diag = float(np.linalg.norm(hi - lo))
+        removed = 0
+        for g in geoms:
+            labels = trimesh.graph.connected_component_labels(g.face_adjacency, node_count=len(g.faces))
+            keep = np.zeros(len(g.faces), dtype=bool)
+            for lab in np.unique(labels):
+                idx = np.nonzero(labels == lab)[0]
+                pts = g.vertices[g.faces[idx].ravel()]
+                if np.linalg.norm(pts.max(0) - pts.min(0)) >= 0.08 * diag:
+                    keep[idx] = True
+                else:
+                    removed += 1
+            if keep.any() and not keep.all():
+                g.update_faces(keep)
+                g.remove_unreferenced_vertices()
+        if removed:
+            self.log(f"  Losse stukjes verwijderd ({removed} weg)")
+        lo = np.min([g.bounds[0] for g in geoms], axis=0)
+        hi = np.max([g.bounds[1] for g in geoms], axis=0)
+        shift = [-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]]
+        for g in geoms:
+            g.apply_translation(shift)
+        self.log("  Op het printbed gezet")
+        textured = any(getattr(g.visual, "kind", None) == "texture" for g in geoms)
+        self.log("  Textuur behouden" if textured else "  Geen textuur gevonden (alleen vorm)")
         out = self.w / "result.glb"
-        cleaned.export(out)
-        (self.w / "report.json").write_text(json.dumps({"before": rep.before, "after": rep.after}, indent=2))
+        trimesh.Scene(geoms).export(out)
+        (self.w / "report.json").write_text(json.dumps(
+            {"before": before, "after": [stats(g) for g in geoms], "textured": textured}, indent=2))
         self.job.progress = 1.0
         return out
 
