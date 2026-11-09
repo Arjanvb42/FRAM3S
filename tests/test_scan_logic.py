@@ -28,7 +28,11 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
     # junk under the table edge (table leg / background sheet), deeper than the object is tall
     slab = trimesh.creation.box((3, 0.1, 3)).subdivide().subdivide().subdivide()
     slab.apply_translation((0, 1.6, -1.6))
-    m = trimesh.util.concatenate([obj, table, wall, slab])
+    # a few dark specks floating just under the object's base, above the table cut
+    specks = [trimesh.creation.icosphere(0, 0.01) for _ in range(3)]
+    for i, sp in enumerate(specks):
+        sp.apply_translation((0.1 * i, 0.0, 0.03))
+    m = trimesh.util.concatenate([obj, table, wall, slab, *specks])
     m.apply_transform(rg)
     if fragment:
         # Like a real OpenMVS mesh: hundreds of loose islands, some faces missing.
@@ -66,7 +70,8 @@ def test_cleanup_upright_without_table():
             out = Reconstructor(job, [], Tools(None, None, False)).cleanup(wd / "mvs" / "scene_textured.obj")
             g = trimesh.load(out, force="scene").dump()[0]
             assert len(g.faces) > 0.5 * 0.7 * 640 * (0.7 if frag else 1), (seed, len(g.faces), job.log)
-            assert abs(g.extents[2] - 1.0) < 0.03, (seed, g.extents, job.log)   # upright, table gone
+            assert abs(g.extents[2] - 1.0) < 0.03, (seed, g.extents, job.log)
+            assert g.bounds[0][2] > -1e-9   # upright, table gone
             assert max(g.extents[:2]) < 0.8, (seed, g.extents)                  # wall gone
             assert g.visual.kind == "texture"
         finally:
