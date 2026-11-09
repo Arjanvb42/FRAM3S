@@ -32,7 +32,9 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
     specks = [trimesh.creation.icosphere(0, 0.01) for _ in range(3)]
     for i, sp in enumerate(specks):
         sp.apply_translation((0.1 * i, 0.0, 0.03))
-    m = trimesh.util.concatenate([obj, table, wall, slab, *specks])
+    # and a long thin sliver from under the base up the side (seen on a real scan)
+    sliver = trimesh.Trimesh([[0.2, 0.3, 0.3], [0.21, 0.3, 0.3], [0.2, 0.31, -0.3]], [[0, 1, 2]])
+    m = trimesh.util.concatenate([obj, table, wall, slab, *specks, sliver])
     m.apply_transform(rg)
     if fragment:
         # Like a real OpenMVS mesh: hundreds of loose islands, some faces missing.

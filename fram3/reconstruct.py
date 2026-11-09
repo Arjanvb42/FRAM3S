@@ -559,16 +559,19 @@ class Reconstructor:
         lo = np.min([g.bounds[0] for g in geoms], axis=0)
         hi = np.max([g.bounds[1] for g in geoms], axis=0)
         # Rest on the bed by the real base, not by a few stray specks under it:
-        # the lowest 0.2% of the surface does not count, and specks entirely
-        # below that are removed.
+        # the lowest 0.2% of the surface does not count, and faces reaching
+        # clearly below that are removed.
         cz = np.concatenate([g.triangles_center[:, 2] for g in geoms])
         ca = np.concatenate([g.area_faces for g in geoms])
         order = np.argsort(cz)
         cum = np.cumsum(ca[order]) / ca.sum()
         base = float(cz[order][np.searchsorted(cum, 0.002)])
-        if base - lo[2] > 0.005 * (hi[2] - lo[2]):
+        # allowance: a bit of the height, and never less than a few triangles
+        allow = max(0.03 * (hi[2] - lo[2]), 3.0 * float(np.sqrt(np.median(ca))))
+        if base - lo[2] > allow:
             for g in geoms:
-                k = g.vertices[g.faces][:, :, 2].max(axis=1) >= base - 0.002 * (hi[2] - lo[2])
+                # drop faces that reach well below the base (long thin slivers too)
+                k = g.vertices[g.faces][:, :, 2].min(axis=1) >= base - allow
                 if k.any() and not k.all():
                     g.update_faces(k)
                     g.remove_unreferenced_vertices()
