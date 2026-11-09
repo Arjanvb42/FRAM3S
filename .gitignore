@@ -1,3 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
+ios/build/
+ios/*.xcodeproj/
+ios/FRAM3Scan/Info.plist

@@ -17,7 +17,8 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+import numpy as np
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
@@ -38,13 +39,20 @@ class Session:
         self.closed = False
         self.seen = 0.0
         self.lock = threading.Lock()
+        # LiDAR preview (only filled by the FRAM3 iPhone app): world points in
+        # metres, their colours, and the camera poses.
+        self.points: list[np.ndarray] = []
+        self.colors: list[np.ndarray] = []
+        self.poses: list[np.ndarray] = []
+        self.depth_frames = 0
 
     def files(self) -> list[Path]:
         return sorted(self.dir.glob("t*.jpg"))
 
     def public(self) -> dict:
         return {"token": self.token, "connected": self.device is not None, "device": self.device,
-                "frames": self.frames, "done": self.done,
+                "frames": self.frames, "done": self.done, "depth_frames": self.depth_frames,
+                "cloud": len(self.poses) if self.depth_frames else 0,
                 "active": time.time() - self.seen < 5 if self.seen else False}
 
 
@@ -130,6 +138,7 @@ async def phone_hello(token: str, request: Request):
     cams = [str(c)[:80] for c in info.get("cameras", [])][:12]
     s.device = {"name": str(info.get("name", "Telefoon"))[:60], "cameras": cams,
                 "lidar": info.get("lidar") if info.get("lidar") in (True, False) else None,
+                "app": info.get("app") is True,
                 "width": int(info.get("width") or 0), "height": int(info.get("height") or 0)}
     return {"ok": True, "max_frames": MAX_FRAMES}
 
@@ -155,6 +164,115 @@ async def phone_frame(token: str, request: Request):
         s.frames += 1
         (s.dir / f"t{s.frames:04d}.jpg").write_bytes(body)
     return {"frames": s.frames, "max_frames": MAX_FRAMES}
+
+
+def backproject(depth: np.ndarray, conf: np.ndarray | None, K: np.ndarray, image_size: tuple[int, int],
+                pose: np.ndarray, step: int = 4, max_depth: float = 3.0) -> tuple[np.ndarray, np.ndarray]:
+    """LiDAR depth map -> world points (metres) and their pixel positions in
+    the photo (0..1). ARKit conventions: K is for the full photo, the camera
+    looks along -z with +y up, `pose` is camera-to-world."""
+    h, w = depth.shape
+    v, u = np.mgrid[step // 2:h:step, step // 2:w:step]
+    d = depth[v, u]
+    ok = np.isfinite(d) & (d > 0.05) & (d < max_depth)
+    if conf is not None:
+        ok &= conf[v, u] >= 1          # ARKit: 0 low, 1 medium, 2 high
+    u, v, d = u[ok].astype(np.float64), v[ok].astype(np.float64), d[ok].astype(np.float64)
+    sx, sy = w / image_size[0], h / image_size[1]
+    x = (u + 0.5 - K[0, 2] * sx) / (K[0, 0] * sx) * d
+    y = (v + 0.5 - K[1, 2] * sy) / (K[1, 1] * sy) * d
+    cam = np.stack([x, -y, -d, np.ones_like(d)], axis=1)
+    return (cam @ pose.T)[:, :3], np.stack([(u + 0.5) / w, (v + 0.5) / h], axis=1)
+
+
+@phone_app.post("/p/{token}/arframe")
+async def phone_arframe(token: str, meta: str = Form(...), image: UploadFile = File(...),
+                        depth: UploadFile | None = File(None), conf: UploadFile | None = File(None)):
+    """A frame from the FRAM3 iPhone app: photo, camera pose and intrinsics
+    from ARKit, and (with LiDAR) a depth map with confidence."""
+    s = _need(token)
+    if s.done:
+        raise HTTPException(409, "Deze scan is al afgerond.")
+    body = await image.read(MAX_FRAME_BYTES + 1)
+    if len(body) > MAX_FRAME_BYTES or len(meta) > 4000:
+        raise HTTPException(413, "Beeld te groot")
+    try:
+        m = json.loads(meta)
+        pose = np.array(m["pose"], np.float64).reshape(4, 4)        # row-major camera-to-world
+        K = np.array(m["intrinsics"], np.float64).reshape(3, 3)     # row-major
+        size = (int(m["width"]), int(m["height"]))
+        with Image.open(io.BytesIO(body)) as im:
+            if im.format != "JPEG":
+                raise ValueError
+            im.draft("RGB", (256, 256))
+            thumb = np.asarray(im.convert("RGB"))
+        if not (np.isfinite(pose).all() and np.isfinite(K).all() and K[0, 0] > 0 and min(size) > 0):
+            raise ValueError
+    except Exception:
+        raise HTTPException(400, "Ongeldig beeld of gegevens")
+    dm = cf = None
+    if depth is not None:
+        try:
+            dw, dh = int(m["depth_width"]), int(m["depth_height"])
+            raw = await depth.read(4 * 1024 * 1024 + 1)
+            if not (0 < dw <= 1024 and 0 < dh <= 1024) or len(raw) != dw * dh * 4:
+                raise ValueError
+            dm = np.frombuffer(raw, "<f4").reshape(dh, dw)
+            if conf is not None:
+                craw = await conf.read(1024 * 1024 + 1)
+                if len(craw) == dw * dh:
+                    cf = np.frombuffer(craw, np.uint8).reshape(dh, dw)
+        except Exception:
+            raise HTTPException(400, "Ongeldige dieptekaart")
+    with s.lock:
+        if s.frames >= MAX_FRAMES:
+            raise HTTPException(409, "Genoeg beelden.")
+        s.frames += 1
+        stem = s.dir / f"t{s.frames:04d}"
+        stem.with_suffix(".jpg").write_bytes(body)
+        stem.with_suffix(".json").write_text(json.dumps({
+            "pose": pose.tolist(), "intrinsics": K.tolist(), "width": size[0], "height": size[1],
+            "depth": [dm.shape[1], dm.shape[0]] if dm is not None else None}))
+        s.poses.append(pose)
+        if dm is not None:
+            stem.with_suffix(".depth").write_bytes(dm.tobytes())
+            if cf is not None:
+                stem.with_suffix(".conf").write_bytes(cf.tobytes())
+            pts, uv = backproject(dm, cf, K, size, pose)
+            th, tw = thumb.shape[:2]
+            col = thumb[np.clip((uv[:, 1] * th).astype(int), 0, th - 1), np.clip((uv[:, 0] * tw).astype(int), 0, tw - 1)]
+            s.points.append(pts.astype(np.float32))
+            s.colors.append(col)
+            s.depth_frames += 1
+    return {"frames": s.frames, "max_frames": MAX_FRAMES}
+
+
+def preview_cloud(s: Session) -> bytes:
+    """The LiDAR points so far, in the live view's format (see live.build_cloud):
+    Z up, centred under the scanned thing, sized to fit the bed."""
+    import struct
+    from .live import MAX_POINTS, VIEW_RADIUS
+    with s.lock:
+        pts = np.concatenate(s.points) if s.points else np.zeros((0, 3), np.float32)
+        col = np.concatenate(s.colors) if s.colors else np.zeros((0, 3), np.uint8)
+        poses = np.array(s.poses)
+    if len(pts) > MAX_POINTS:
+        pick = np.random.default_rng(0).choice(len(pts), MAX_POINTS, replace=False)
+        pts, col = pts[pick], col[pick]
+    up = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], np.float64)     # ARKit y-up -> FRAM3 z-up
+    p = pts.astype(np.float64) @ up.T
+    c = poses[:, :3, 3] @ up.T
+    fwd = -poses[:, :3, 2] @ up.T
+    cup = poses[:, :3, 1] @ up.T
+    mid = np.median(p, axis=0) if len(p) else c.mean(axis=0)
+    floor = float(np.percentile(p[:, 2], 2)) if len(p) > 20 else float(mid[2])
+    origin = np.array([mid[0], mid[1], floor])
+    radius = float(np.median(np.linalg.norm(c[:, :2] - origin[:2], axis=1))) or 1.0
+    k = VIEW_RADIUS / max(radius, 0.05)
+    cams = np.hstack([(c - origin) * k, fwd, cup]).astype("<f4")
+    p = ((p - origin) * k).astype("<f4")
+    return (b"F3LV" + struct.pack("<II", len(cams), len(p)) + cams.tobytes() + p.tobytes()
+            + np.ascontiguousarray(col, dtype=np.uint8).tobytes())
 
 
 @phone_app.post("/p/{token}/done")

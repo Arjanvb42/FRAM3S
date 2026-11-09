@@ -735,7 +735,7 @@ function pollScan(id) {
 
 // ------------------------------------------------------ scan with a phone
 // A QR code pairs a phone on the same Wi-Fi; its camera frames arrive here live.
-const phone = { token: null, timer: null, frames: -1 };
+const phone = { token: null, timer: null, frames: -1, cloud: 0, preview: false };
 
 $('phone-start').onclick = async () => {
   try {
@@ -775,6 +775,26 @@ async function phonePoll() {
     $('phone-frame').src = `/api/phone/${phone.token}/frame/${s.frames - 1}?n=${s.frames}`;
     $('phone-frame').hidden = false;
   }
+  if (d.app && s.depth_frames) $('phone-text').textContent = `${s.frames} beelden ontvangen · LiDAR actief, ${s.depth_frames} dieptebeelden`;
+  if (s.cloud && s.cloud !== phone.cloud) {
+    // The iPhone app sends LiDAR depth: show the points while you walk around.
+    phone.cloud = s.cloud;
+    const c = await fetch(`/api/phone/${phone.token}/cloud`);
+    if (c.ok && phone.token) {
+      if (!phone.preview) {
+        liveStop();
+        phone.preview = true;
+        live.group = new THREE.Group();
+        scene.add(live.group);
+        select([]);
+        objects.visible = false;
+        orbit.target.set(0, 0, 25);
+        camera.position.set(250, -310, 210);
+        $('phone-pair').classList.add('docked');
+      }
+      showCloud(await c.arrayBuffer());
+    }
+  }
   $('phone-finish').hidden = s.frames < 8;
   $('phone-finish').textContent = `Model maken van ${s.frames} beelden`;
   if (s.done) phoneFinish();
@@ -800,7 +820,16 @@ async function phoneFinish() {
 function phoneClose() {
   clearInterval(phone.timer);
   phone.token = null;
+  phone.cloud = 0;
   $('phone-pair').hidden = true;
+  $('phone-pair').classList.remove('docked');
+  if (phone.preview) {
+    phone.preview = false;
+    disposeLive();
+    scene.remove(live.group);
+    live.group = null;
+    objects.visible = true;
+  }
 }
 $('phone-finish').onclick = phoneFinish;
 $('phone-cancel').onclick = () => { phoneClose(); fetch('/api/phone/stop', { method: 'POST' }); };

@@ -87,6 +87,10 @@ button, input, select { font: inherit; color: inherit; }
 @keyframes live-pulse { 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } .live img { transition: none; } }
 .phone-pair { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; background: rgba(10, 12, 15, .55); backdrop-filter: blur(3px); }
+.phone-pair.docked { background: none; backdrop-filter: none; pointer-events: none; place-items: end start; padding: 14px; }
+.phone-pair.docked .phone-card { pointer-events: auto; width: 250px; padding: 12px 14px; }
+.phone-pair.docked .phone-card img { max-height: 150px; }
+.phone-pair.docked h2 { font-size: 14px; margin-bottom: 8px; }
 .phone-card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px 24px; width: min(380px, 90%); text-align: center; box-shadow: 0 12px 48px rgba(0, 0, 0, .5); }
 .phone-card h2 { margin: 0 0 12px; }
 .phone-card p { color: var(--muted); font-size: 13px; margin: 10px 0; }

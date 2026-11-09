@@ -1,0 +1,39 @@
+name: iPhone-app bouwen
+
+on:
+  push:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode-project maken
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+      - name: Bouwen (zonder ondertekening)
+        run: |
+          cd ios
+          xcodebuild -project FRAM3Scan.xcodeproj -scheme FRAM3Scan -configuration Release \
+            -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1 \
+            || { grep -E "error:" build.log | head -n 80; tail -n 30 build.log; exit 1; }
+          test -d build/Build/Products/Release-iphoneos/FRAM3Scan.app
+      - name: IPA maken
+        run: |
+          mkdir Payload
+          cp -R ios/build/Build/Products/Release-iphoneos/FRAM3Scan.app Payload/
+          zip -qry FRAM3Scan-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FRAM3Scan-unsigned
+          path: FRAM3Scan-unsigned.ipa

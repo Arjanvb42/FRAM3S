@@ -277,6 +277,17 @@ def phone_frame(token: str, i: int):
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/phone/{token}/cloud")
+def phone_cloud(token: str):
+    """LiDAR points received so far (FRAM3 iPhone app), for the live preview."""
+    from . import phone
+    s = phone.current(token) or _err(KeyError("Koppeling verlopen"), 404)
+    if not s.depth_frames:
+        _err(KeyError("Nog geen diepte"), 404)
+    return Response(phone.preview_cloud(s), media_type="application/octet-stream",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.post("/api/phone/{token}/finish")
 def phone_finish(token: str, preset: str = Form("normaal"), remove_floor: bool = Form(True)):
     """Turn the frames the phone sent into a scan and stop listening on the network."""
@@ -295,6 +306,12 @@ def phone_finish(token: str, preset: str = Form("normaal"), remove_floor: bool =
         dst = wd / "input" / f"telefoon-{f.name[1:]}"
         shutil.move(f, dst)
         paths.append(dst)
+    # Poses and LiDAR depth from the iPhone app go along with the scan.
+    extra = [f for f in s.dir.iterdir() if f.suffix in (".json", ".depth", ".conf")]
+    if extra:
+        (wd / "arkit").mkdir()
+        for f in extra:
+            shutil.move(f, wd / "arkit" / f.name)
     phone.stop()
     job = Job(jid, wd, preset, remove_floor)
     job.save()

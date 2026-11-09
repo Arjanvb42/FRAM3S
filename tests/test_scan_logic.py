@@ -235,10 +235,66 @@ def test_heavy_mesh_is_simplified_before_texturing():
         shutil.rmtree(wd)
 
 
+def test_iphone_app_frames_give_a_lidar_preview():
+    import io
+    import json
+    import struct
+    try:
+        from fastapi.testclient import TestClient
+    except (ImportError, RuntimeError):      # httpx is only needed for this test
+        return
+    from fram3 import phone
+    wd = Path(tempfile.mkdtemp())
+    try:
+        # geometry: a wall 1 m in front of a camera that looks along -z, y up
+        K = np.array([[1500.0, 0, 960], [0, 1500.0, 720], [0, 0, 1]])
+        depth = np.ones((192, 256), np.float32)
+        pts, uv = phone.backproject(depth, None, K, (1920, 1440), np.eye(4), step=8)
+        assert np.allclose(pts[:, 2], -1) and abs(pts[:, 0].mean()) < 0.01 and abs(pts[:, 1].mean()) < 0.01
+        top_left = pts[np.argmin(uv.sum(axis=1))]
+        assert top_left[0] < 0 < top_left[1]            # image up is world up
+        assert abs(pts[:, 0].max() - 0.64) < 0.03       # half the image width at 1 m
+
+        phone._session = s = phone.Session(wd)
+        c = TestClient(phone.phone_app)
+        buf = io.BytesIO()
+        Image.new("RGB", (1920, 1440), (120, 90, 60)).save(buf, "JPEG")
+        conf = np.full((192, 256), 2, np.uint8)
+        for i in range(6):
+            a = i * 0.5
+            pose = np.eye(4)                           # orbit at 1 m around a point, looking at it
+            pose[:3, 0] = [np.cos(a), 0, -np.sin(a)]
+            pose[:3, 2] = [np.sin(a), 0, np.cos(a)]
+            pose[:3, 3] = pose[:3, 2]
+            meta = {"pose": pose.flatten().tolist(), "intrinsics": K.flatten().tolist(), "width": 1920,
+                    "height": 1440, "depth_width": 256, "depth_height": 192}
+            r = c.post(f"/p/{s.token}/arframe", data={"meta": json.dumps(meta)},
+                       files={"image": ("f.jpg", buf.getvalue(), "image/jpeg"),
+                              "depth": ("d", depth.tobytes(), "application/octet-stream"),
+                              "conf": ("c", conf.tobytes(), "application/octet-stream")})
+            assert r.status_code == 200, r.text
+        assert c.post("/p/nope/arframe", data={"meta": "{}"}, files={"image": ("f.jpg", b"x")}).status_code == 404
+        bad = c.post(f"/p/{s.token}/arframe", data={"meta": json.dumps(meta)},
+                     files={"image": ("f.jpg", buf.getvalue()), "depth": ("d", b"1234")})
+        assert bad.status_code == 400
+        assert s.public()["depth_frames"] == 6 and len(list(s.dir.glob("t*.depth"))) == 6
+        blob = phone.preview_cloud(s)
+        nc, npts = struct.unpack_from("<II", blob, 4)
+        assert nc == 6 and npts > 5000 and len(blob) == 12 + nc * 36 + npts * 15
+        cams = np.frombuffer(blob, "<f4", nc * 9, 12).reshape(nc, 9)
+        assert np.allclose(cams[:, 8], 1, atol=1e-5)    # phones held upright -> up is +z in FRAM3
+        rgb = np.frombuffer(blob, np.uint8, 3, 12 + nc * 36 + npts * 12)
+        assert abs(int(rgb[0]) - 120) < 12
+    finally:
+        phone._session = None
+        shutil.rmtree(wd)
+
+
 if __name__ == "__main__":
     test_cleanup_upright_without_table()
     test_low_registration_fails_clearly()
     test_gpu_out_of_memory_falls_back_to_cpu()
     test_live_view_reads_growing_scan()
     test_heavy_mesh_is_simplified_before_texturing()
+    test_iphone_app_frames_give_a_lidar_preview()
     print("ok")

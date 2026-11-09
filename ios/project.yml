@@ -1,0 +1,29 @@
+name: FRAM3Scan
+options:
+  bundleIdPrefix: nl.fram3
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  FRAM3Scan:
+    type: application
+    platform: iOS
+    sources: [FRAM3Scan]
+    info:
+      path: FRAM3Scan/Info.plist
+      properties:
+        CFBundleDisplayName: FRAM3 Scan
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        NSCameraUsageDescription: FRAM3 gebruikt de camera en LiDAR om een object te scannen.
+        NSLocalNetworkUsageDescription: FRAM3 stuurt de beelden naar FRAM3 op je eigen computer in je wifi-netwerk.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiredDeviceCapabilities: [arkit]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: nl.fram3.scan
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGNING_ALLOWED: "NO"
