@@ -202,6 +202,42 @@ def scan_cancel(jid: str):
     return job.public()
 
 
+@app.get("/api/scan/{jid}/live")
+def scan_live(jid: str):
+    """What the scan is doing right now, for the live view."""
+    from . import live
+    job = jobs.get(jid) or _err(KeyError("Onbekende scan"), 404)
+    return live.state(job.workdir, job.stage_key, job.stage_frac)
+
+
+@app.get("/api/scan/{jid}/live/frame/{i}")
+def scan_live_frame(jid: str, i: int):
+    from . import live
+    job = jobs.get(jid) or _err(KeyError("Onbekende scan"), 404)
+    files = live.frame_files(job.workdir)
+    if not files:
+        _err(KeyError("Nog geen beelden"), 404)
+    try:
+        data = live.thumbnail(files[max(0, min(len(files) - 1, i))])
+    except Exception as e:   # the file may just have been moved or is half written
+        _err(e, 404)
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/scan/{jid}/live/cloud")
+def scan_live_cloud(jid: str):
+    from . import live
+    job = jobs.get(jid) or _err(KeyError("Onbekende scan"), 404)
+    try:
+        src = live.cloud_source(job.workdir)
+        if not src:
+            raise KeyError("Nog geen puntenwolk")
+        data = live.build_cloud(src)
+    except Exception as e:   # tools are writing these files while we read them
+        _err(e, 404)
+    return Response(data, media_type="application/octet-stream", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/scan/{jid}/result")
 def scan_result(jid: str):
     job = jobs.get(jid)

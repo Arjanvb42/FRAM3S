@@ -95,9 +95,16 @@
           <button data-view="fit" title="Alles in beeld (F)">Passend</button>
         </div>
         <div class="seg">
+          <button id="spin-toggle" title="Rustig om het model heen draaien">⟲ Draaien</button>
+        </div>
+        <div class="seg">
           <button id="undo" title="Ongedaan maken (Ctrl+Z)">↶</button>
           <button id="redo" title="Opnieuw (Ctrl+Y)">↷</button>
         </div>
+      </div>
+      <div class="live" id="live" hidden>
+        <img id="live-frame" alt="Beeld waar de scan nu mee bezig is" hidden>
+        <div class="live-cap"><span class="live-dot"></span><strong id="live-title">Scan bezig</strong><span id="live-sub"></span></div>
       </div>
       <div class="drop-overlay" id="drop-overlay" hidden>Laat los om te openen</div>
       <div class="toast" id="toast" hidden></div>

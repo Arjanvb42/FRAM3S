@@ -172,8 +172,53 @@ def test_gpu_out_of_memory_falls_back_to_cpu():
         shutil.rmtree(wd)
 
 
+def test_live_view_reads_growing_scan():
+    """The live view shows cameras and points upright, centred and bed-sized."""
+    import struct
+    from fram3 import live
+    wd = Path(tempfile.mkdtemp())
+    try:
+        fake_scan(wd, 3)
+        model = wd / "dense" / "sparse"
+        assert live.cloud_source(wd) is None or live.cloud_source(wd)[0] != "sparse"
+        rng = np.random.default_rng(0)
+        pts = rng.normal(0, 0.3, (500, 3))
+        with (model / "points3D.bin").open("wb") as f:
+            f.write(struct.pack("<Q", len(pts)))
+            for i, p in enumerate(pts):
+                k = i % 4
+                f.write(struct.pack("<Q3d3BdQ", i, *p, 10, 20, 30, 0.5, k) + b"\0" * 8 * k)
+        xyz, rgb = live.read_points3d(model / "points3D.bin")
+        assert np.allclose(xyz, pts) and (rgb == [10, 20, 30]).all()
+        src = live.cloud_source(wd)
+        assert src[0] == "sparse"
+        blob = live.build_cloud(src)
+        nc, npts = struct.unpack_from("<II", blob, 4)
+        assert blob[:4] == b"F3LV" and nc == 24 and 0 < npts <= 500
+        assert len(blob) == 12 + nc * 36 + npts * 15
+        cams = np.frombuffer(blob, "<f4", nc * 9, 12).reshape(nc, 9)
+        r = np.linalg.norm(cams[:, :2], axis=1)
+        assert abs(np.median(r) - live.VIEW_RADIUS) < 15, np.median(r)   # orbit around the middle
+        assert (cams[:, 2] > 0).all() and (cams[:, 8] > 0.5).all()       # above the bed, upright
+        # a dense cloud takes over as soon as it exists
+        a = np.zeros(1000, dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")])
+        a["x"], a["y"], a["z"] = rng.normal(0, 0.3, (3, 1000))
+        with (wd / "mvs" / "scene_dense.ply").open("wb") as f:
+            f.write(("ply\nformat binary_little_endian 1.0\nelement vertex 1000\n" + "".join(
+                f"property {t} {n}\n" for n, t in [("x", "float"), ("y", "float"), ("z", "float"), ("red", "uchar"),
+                                                    ("green", "uchar"), ("blue", "uchar")]) + "end_header\n").encode())
+            a.tofile(f)
+        assert live.cloud_source(wd)[0] == "dense"
+        assert struct.unpack_from("<II", live.build_cloud(live.cloud_source(wd)), 4)[1] > 900
+        st = live.state(wd, "dense", 0.5)
+        assert st["cloud"]["kind"] == "dense" and st["frames"] == 0
+    finally:
+        shutil.rmtree(wd)
+
+
 if __name__ == "__main__":
     test_cleanup_upright_without_table()
     test_low_registration_fails_clearly()
     test_gpu_out_of_memory_falls_back_to_cpu()
+    test_live_view_reads_growing_scan()
     print("ok")

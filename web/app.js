@@ -713,14 +713,17 @@ function pollScan(id) {
     const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 10;
     log.textContent = j.log.join('\n');
     if (atBottom) log.scrollTop = log.scrollHeight;
+    if ((j.status === 'bezig' || j.status === 'wachtrij') && activeTab === 'scan') liveUpdate(id, j).catch(() => {});
     if (['klaar', 'fout', 'geannuleerd', 'onderbroken'].includes(j.status)) {
       clearInterval(scanPoll);
+      liveStop();
       loadScanHistory();
       $('scan-start').disabled = !scanFiles.length;
       if (j.status === 'klaar') {
         const buf = await (await fetch(`/api/scan/${id}/result`)).arrayBuffer();
         switchTab('edit');
         await addGlb(buf, 'Scan');
+        showOff();
         toast(j.warning ? `Scan klaar, maar let op: ${j.warning}`
           : 'Scan klaar. Stel de echte afmeting rechts in (B/D/H), want een scan heeft geen vaste schaal.', !!j.warning);
         scanFiles = [];
@@ -728,6 +731,143 @@ function pollScan(id) {
       } else if (j.status === 'fout') toast(j.error, true);
     }
   }, 1000);
+}
+
+// ------------------------------------------------------------ live view
+// While a scan runs, the viewport shows what it is doing: the frame it works
+// on, the cameras it has placed and the point cloud as it fills in.
+const live = { id: null, group: null, version: null, frame: null, busy: false, cams: 0, pts: 0 };
+
+function liveStart(id) {
+  if (live.id === id) return;
+  liveStop();
+  Object.assign(live, { id, version: null, frame: null, cams: 0, pts: 0 });
+  live.group = new THREE.Group();
+  scene.add(live.group);
+  select([]);
+  objects.visible = false;
+  $('live').hidden = false;
+  $('live').classList.remove('corner');
+  $('live-frame').hidden = true;
+}
+
+function liveStop() {
+  if (!live.id) return;
+  live.id = null;
+  disposeLive();
+  scene.remove(live.group);
+  live.group = null;
+  objects.visible = true;
+  $('live').hidden = true;
+  setSpin(false);
+}
+
+function disposeLive() {
+  for (const c of [...live.group.children]) {
+    c.geometry.dispose();
+    c.material.dispose();
+    live.group.remove(c);
+  }
+}
+
+async function liveUpdate(id, job) {
+  liveStart(id);
+  if (live.busy) return;
+  live.busy = true;
+  try {
+    const s = await (await fetch(`/api/scan/${id}/live`)).json();
+    if (live.id !== id) return;
+    if (s.frames && s.frame !== live.frame) {
+      live.frame = s.frame;
+      const img = $('live-frame');
+      img.src = `/api/scan/${id}/live/frame/${s.frame}?n=${s.frames}`;
+      img.hidden = false;
+    }
+    if (s.cloud && s.cloud.version !== live.version) {
+      const r = await fetch(`/api/scan/${id}/live/cloud`);
+      if (r.ok && live.id === id) {
+        const first = live.version === null;
+        showCloud(await r.arrayBuffer());
+        live.version = s.cloud.version;
+        $('live').classList.add('corner');
+        if (first) {
+          orbit.target.set(0, 0, 25);
+          camera.position.set(250, -310, 210);
+          setSpin(true);
+        }
+      }
+    }
+    $('live-title').textContent = job.stage || 'Scan bezig';
+    $('live-sub').textContent = liveText(s);
+  } finally { live.busy = false; }
+}
+
+function liveText(s) {
+  const nl = (n) => n.toLocaleString('nl');
+  switch (s.stage) {
+    case 'frames': return s.frames ? `${nl(s.frames)} beelden uit de video gehaald` : 'Video lezen…';
+    case 'features': return `Beeld ${s.frame + 1} van ${s.frames}`;
+    case 'matching': return 'Zoeken welke beelden hetzelfde zien';
+    case 'sparse': return live.cams ? `${live.cams} van ${s.frames} camera's geplaatst · ${nl(live.pts)} punten` : 'Eerste camera\'s zoeken…';
+    case 'dense':
+      if (s.cloud && s.cloud.kind === 'dense') return `${nl(live.pts)} punten getoond`;
+      return s.depth_maps ? `Diepte gemeten in ${s.depth_maps} van ${live.cams || s.frames} beelden` : 'Diepte meten per beeld…';
+    case 'mesh': return 'Van punten naar een dicht oppervlak';
+    case 'texture': return 'Kleur uit de beelden op het model leggen';
+    case 'cleanup': return 'Rechtop zetten en omgeving weghalen';
+    default: return '';
+  }
+}
+
+function showCloud(buf) {
+  const head = new DataView(buf);
+  if (head.getUint32(0, true) !== 0x564c3346) return; // 'F3LV'
+  const nc = head.getUint32(4, true), np = head.getUint32(8, true);
+  const cams = new Float32Array(buf, 12, nc * 9);
+  const pos = new Float32Array(buf, 12 + nc * 36, np * 3);
+  const rgb = new Uint8Array(buf, 12 + nc * 36 + np * 12, np * 3);
+  disposeLive();
+  // points: colours arrive as sRGB bytes, three.js wants linear values
+  const col = new Float32Array(np * 3);
+  for (let i = 0; i < col.length; i++) col[i] = Math.pow(rgb[i] / 255, 2.2);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const size = np > 60000 ? 0.9 : 1.6;
+  live.group.add(new THREE.Points(g, new THREE.PointsMaterial({ size, vertexColors: true })));
+  // cameras: a small pyramid per camera, pointing where it looked
+  const d = 9, w = 5, h = 3.5, lines = [];
+  const p = new THREE.Vector3(), f = new THREE.Vector3(), u = new THREE.Vector3(), r = new THREE.Vector3();
+  for (let i = 0; i < nc; i++) {
+    p.fromArray(cams, i * 9); f.fromArray(cams, i * 9 + 3); u.fromArray(cams, i * 9 + 6);
+    r.crossVectors(f, u);
+    const c = [[1, 1], [-1, 1], [-1, -1], [1, -1]].map(([a, b]) =>
+      p.clone().addScaledVector(f, d).addScaledVector(r, a * w).addScaledVector(u, b * h));
+    const apex = p.clone();
+    for (let k = 0; k < 4; k++) lines.push(apex, c[k], c[k], c[(k + 1) % 4]);
+  }
+  const lg = new THREE.BufferGeometry().setFromPoints(lines);
+  live.group.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0x00b3a4, transparent: true, opacity: 0.85 })));
+  live.cams = nc;
+  live.pts = np;
+}
+
+// Turntable: slowly circle the model. Any drag or scroll in the view stops it.
+function setSpin(on) {
+  orbit.autoRotate = on;
+  orbit.autoRotateSpeed = 1.6;
+  $('spin-toggle').classList.toggle('active', on);
+  gizmoHelper.visible = !on && !!gizmo.object;
+  highlights.visible = !on;
+}
+$('spin-toggle').onclick = () => setSpin(!orbit.autoRotate);
+orbit.addEventListener('start', () => { if (orbit.autoRotate) setSpin(false); });
+
+function showOff() {
+  // A finished scan: step back to a 3/4 view and circle it.
+  const d = camera.position.distanceTo(orbit.target);
+  camera.position.copy(orbit.target).addScaledVector(new THREE.Vector3(0.8, -1, 0.55).normalize(), d * 1.25);
+  setSpin(true);
 }
 
 // ------------------------------------------------------------ panels
@@ -889,7 +1029,10 @@ $('snap-toggle').onclick = (e) => {
 
 // ---------------------------------------------------------------- tabs
 document.querySelectorAll('.tab').forEach((t) => (t.onclick = () => switchTab(t.dataset.tab)));
+let activeTab = 'edit';
 function switchTab(name) {
+  activeTab = name;
+  if (name !== 'scan') liveStop(); // the editor stays usable while a scan runs
   if (name === 'scan') loadScanHistory();
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('[data-panel]').forEach((p) => (p.hidden = p.dataset.panel !== name));

@@ -84,6 +84,8 @@ class Job:
     result: str | None = None    # path of result.glb
     error: str | None = None
     warning: str | None = None
+    stage_key: str = ""          # which step is running, for the live view
+    stage_frac: float = 0.0
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _proc: subprocess.Popen | None = field(default=None, repr=False)
 
@@ -159,6 +161,7 @@ class Reconstructor:
                 self.job.progress = done + weight * frac
                 break
             done += weight
+        self.job.stage_key, self.job.stage_frac = name, frac
         if self.job.stage != STAGE_NL[name]:
             self.job.stage = STAGE_NL[name]
             self.log(f"== {STAGE_NL[name]} ==")
@@ -237,7 +240,7 @@ class Reconstructor:
             self.log("Hervatten: frames en camera's zijn al klaar")
         else:
             shutil.rmtree(images, ignore_errors=True)
-            for d in ("sparse", "dense", "cameras"):
+            for d in ("sparse", "dense", "cameras", "snap"):
                 shutil.rmtree(self.w / d, ignore_errors=True)
             # New cameras mean a new coordinate frame: an old mesh would not fit.
             for f in (self.w / "mvs").glob("*") if (self.w / "mvs").is_dir() else []:
@@ -267,7 +270,8 @@ class Reconstructor:
         cams = self.w / "cameras"
         if (self.w / "dense" / "sparse").is_dir() and not cams.exists():
             shutil.copytree(self.w / "dense" / "sparse", cams)
-        for d in list(self.w.glob("cand*")) + [self.w / "images", self.w / "dense", self.w / "sparse"]:
+        for d in list(self.w.glob("cand*")) + [self.w / "images", self.w / "dense", self.w / "sparse",
+                                               self.w / "snap"]:
             shutil.rmtree(d, ignore_errors=True)
         (self.w / "colmap.db").unlink(missing_ok=True)
         mvs = self.w / "mvs"
@@ -452,9 +456,25 @@ class Reconstructor:
                         "--SiftMatching.use_gpu", gpu,
                         on_line=self.counter("matching", r"Matching image \[(\d+)/(\d+)\]"))
 
+    def snapshot_option(self) -> str | None:
+        """Name of COLMAP's snapshot-frequency option (it differs per version)."""
+        try:
+            out = subprocess.run(self.tools.colmap + ["mapper", "-h"], capture_output=True, text=True)
+            m = re.search(r"--Mapper\.snapshot_(images|frames)_freq", out.stdout + out.stderr)
+            return m.group(0) if m else None
+        except Exception:
+            return None
+
     def map(self, db: Path, images: Path, sp: Path, n_imgs: int, relaxed: bool = False) -> tuple[Path, int]:
         # "Registering image #12 (7)": the number in brackets is how many images are placed so far.
         extra = ["--Mapper.init_min_tri_angle", "4", "--Mapper.init_min_num_inliers", "50"] if relaxed else []
+        # Snapshots of the growing model, so the app can show it live.
+        snap = self.w / "snap"
+        shutil.rmtree(snap, ignore_errors=True)
+        freq = self.snapshot_option()
+        if freq:
+            snap.mkdir()
+            extra += ["--Mapper.snapshot_path", str(snap), freq, str(max(4, n_imgs // 25))]
         self.colmap("mapper", "--database_path", str(db), "--image_path", str(images),
                     "--output_path", str(sp), *extra,
                     on_line=self.counter("sparse", r"Registering image #\d+ \((\d+)\)", total=n_imgs))

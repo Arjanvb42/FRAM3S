@@ -78,6 +78,14 @@ button, input, select { font: inherit; color: inherit; }
 .seg button:hover { color: var(--text); }
 .seg button.active { background: var(--accent); color: #fff; }
 .seg.small button { padding: 3px 8px; font-size: 12px; }
+.live { position: absolute; inset: 0; z-index: 1; pointer-events: none; display: grid; place-items: center; }
+.live img { max-width: 62%; max-height: 68%; border-radius: 10px; border: 1px solid var(--line); box-shadow: 0 10px 40px rgba(0, 0, 0, .5); transition: all .5s ease; }
+.live.corner img { position: absolute; left: 14px; bottom: 14px; max-width: 220px; max-height: 240px; }
+.live-cap { position: absolute; top: 54px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 12px; white-space: nowrap; backdrop-filter: blur(6px); }
+.live-cap span { color: var(--muted); }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); animation: live-pulse 1.2s ease-in-out infinite; }
+@keyframes live-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } .live img { transition: none; } }
 .drop-overlay { position: absolute; inset: 12px; border: 2px dashed var(--accent); border-radius: 14px; display: grid; place-items: center; font-size: 18px; background: rgba(0, 179, 164, .08); z-index: 5; pointer-events: none; }
 .toast { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--line); padding: 8px 14px; border-radius: var(--radius); z-index: 6; max-width: 70%; box-shadow: 0 6px 24px rgba(0, 0, 0, .4); }
 .toast.err { border-color: var(--danger); }
