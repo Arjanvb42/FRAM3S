@@ -303,7 +303,7 @@ class Reconstructor:
             self.save_image(img, out / f"p{idx:05d}.jpg")
         return idx
 
-    def sharp_frames(self, video: Path, want: int, vi: int) -> list[Image.Image]:
+    def sharp_frames(self, video: Path, want: int, vi: int):
         """Sample 3x more frames than needed, keep the sharpest one in each window."""
         dur = _probe_duration(video)
         # More than ~8 frames per second of video adds near-duplicates: lots of
@@ -312,22 +312,46 @@ class Reconstructor:
         cand_dir = self.w / f"cand{vi}"
         cand_dir.mkdir(exist_ok=True)
         fps = max(0.5, min(30.0, (want * 3) / max(dur, 1.0)))
-        self.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(video),
-                  "-vf", f"fps={fps:.4f},scale='min({self.p['max_side']},iw)':-2",
-                  "-q:v", "2", str(cand_dir / "c%06d.jpg")])
+        ms = self.p["max_side"]
+        # Cap the longest side (phone videos are often portrait).
+        vf = [f"fps={fps:.4f}",
+              f"scale=w='if(gte(iw,ih),min({ms},iw),-2)':h='if(gte(iw,ih),-2,min({ms},ih))'"]
+        info = _probe_video(video)
+        if info.get("transfer") in HDR_TRANSFERS:
+            # iPhone HDR (HLG / Dolby Vision): convert to normal colours, else the
+            # texture comes out pale and grey.
+            if _has_filter("zscale") and _has_filter("tonemap"):
+                vf.append("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+                          "tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+                self.log(f"{video.name}: HDR-video, kleuren omgezet naar normaal")
+            else:
+                self.log(f"{video.name}: HDR-video, maar deze ffmpeg kan dat niet omzetten; "
+                         "kleuren kunnen flets zijn")
+        try:
+            self.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(video),
+                      "-vf", ",".join(vf), "-q:v", "2", str(cand_dir / "c%06d.jpg")])
+        except Exception:
+            codec = info.get("codec", "")
+            if codec and not _has_decoder(codec):
+                raise RuntimeError(
+                    f"Deze ffmpeg kan {codec.upper()}-video niet lezen ({video.name}). "
+                    "Op Fedora los je dat op met: sudo dnf swap ffmpeg-free ffmpeg --allowerasing")
+            raise
         files = sorted(cand_dir.glob("c*.jpg"))
         if not files:
-            return []
+            return
         scores = [_sharpness(f) for f in files]
-        picked = []
+        n = 0
         median = float(np.median(scores))
         # Exactly `want` evenly spaced windows; the sharpest frame of each wins.
+        # Frames are handed out one at a time: 250 frames of 4K do not fit in memory.
         for chunk in np.array_split(np.arange(len(files)), min(want, len(files))):
             best = max(chunk, key=lambda j: scores[j])
             if scores[best] >= 0.35 * median:  # skip windows that are all motion blur
-                picked.append(Image.open(files[best]).convert("RGB"))
-        self.log(f"{video.name}: {len(files)} kandidaten, {len(picked)} scherpe frames gekozen")
-        return picked
+                n += 1
+                with Image.open(files[best]) as im:
+                    yield im.convert("RGB")
+        self.log(f"{video.name}: {len(files)} kandidaten, {n} scherpe frames gekozen")
 
     def save_image(self, img: Image.Image, dst: Path):
         ms = self.p["max_side"]
@@ -650,6 +674,39 @@ def run_job(job: Job, inputs: list[Path], tools: Tools | None = None):
 
 def _du(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+HDR_TRANSFERS = {"arib-std-b67", "smpte2084"}
+_FF_CACHE: dict = {}
+
+
+def _ff_list(kind: str) -> str:
+    if kind not in _FF_CACHE:
+        try:
+            _FF_CACHE[kind] = subprocess.run(["ffmpeg", "-hide_banner", f"-{kind}"],
+                                             capture_output=True, text=True).stdout
+        except Exception:
+            _FF_CACHE[kind] = ""
+    return _FF_CACHE[kind]
+
+
+def _has_filter(name: str) -> bool:
+    return any(len(l.split()) > 1 and l.split()[1] == name for l in _ff_list("filters").splitlines())
+
+
+def _has_decoder(codec: str) -> bool:
+    return any(len(l.split()) > 1 and l.split()[1] == codec for l in _ff_list("decoders").splitlines())
+
+
+def _probe_video(video: Path) -> dict:
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=codec_name,color_transfer", "-of", "default=nw=1",
+                              str(video)], capture_output=True, text=True).stdout
+        kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+        return {"codec": kv.get("codec_name", ""), "transfer": kv.get("color_transfer", "")}
+    except Exception:
+        return {}
 
 
 def _probe_duration(video: Path) -> float:
