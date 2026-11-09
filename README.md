@@ -10,6 +10,14 @@ Van video of foto's naar een 3D-model, dat je daarna bewerkt en exporteert. Het 
 
 De eerste keer maakt het script een Python-omgeving aan in `.venv` en installeert het de pakketten. Daarna opent de browser op http://127.0.0.1:8733.
 
+Om FRAM3 als app in je appmenu te zetten (met eigen icoon en venster):
+
+```bash
+scripts/install-desktop.sh
+```
+
+Daarna start je FRAM3 gewoon vanuit het appmenu. De server start dan vanzelf op de achtergrond.
+
 Voor scannen zijn COLMAP en OpenMVS nodig. Die installeer je eenmalig met:
 
 ```bash
