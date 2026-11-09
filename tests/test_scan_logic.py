@@ -294,11 +294,12 @@ def test_filming_from_above_still_finds_up():
     """Looking down into a basket: image-up lies flat, gravity must come from
     the level horizontal axis of the phone."""
     from fram3.align import gravity_rotation
-    for seed, elev in [(0, 55), (1, 70), (2, 80), (3, 20)]:
+    # the last case is the dog video: a short arc, so the mean image-up is still strong
+    for seed, elev, arc in [(0, 55, 1.6), (1, 70, 1.6), (2, 80, 1.6), (3, 20, 1.6), (4, 75, 0.7)]:
         rng = np.random.default_rng(seed)
         rg = trimesh.transformations.random_rotation_matrix(rng.random(3))[:3, :3]
         C, U, F = [], [], []
-        for a in np.linspace(0, 1.6 * np.pi, 60):
+        for a in np.linspace(0, arc * np.pi, 60):
             e = np.radians(elev + rng.normal(0, 6))
             r = 1.0 + rng.normal(0, 0.1)
             c = r * np.array([np.cos(a) * np.cos(e), np.sin(a) * np.cos(e), np.sin(e)])
@@ -311,7 +312,7 @@ def test_filming_from_above_still_finds_up():
             C.append(rg @ c), U.append(rg @ u), F.append(rg @ f)
         rot = gravity_rotation(np.array(C), np.array(U), np.array(F))
         up = rot[:3, :3] @ rg @ [0, 0, 1]
-        assert up[2] > np.cos(np.radians(8)), (elev, up)
+        assert up[2] > np.cos(np.radians(8)), (elev, arc, up)
 
 
 if __name__ == "__main__":

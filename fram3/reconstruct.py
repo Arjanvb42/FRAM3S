@@ -587,10 +587,19 @@ class Reconstructor:
             c = trimesh.transform_points(centers, rot)
             target = look_at_point(centers, fwds)
             if target is not None:
-                mid = trimesh.transform_points(target[None], rot)[0, :2]
+                mid3 = trimesh.transform_points(target[None], rot)[0]
+                mid = mid3[:2]
             else:
-                mid = c[:, :2].mean(axis=0)
+                mid3, mid = None, c[:, :2].mean(axis=0)
             radius = float(np.median(np.linalg.norm(c[:, :2] - mid, axis=1)))
+            if mid3 is not None:
+                # Filmed from above, the cameras hover over the object instead of
+                # circling it. What they saw is then set by their height: about
+                # 0.6 x height to each side for a phone camera.
+                height = float(np.median(c[:, 2] - mid3[2]))
+                if 0.75 * height > radius:
+                    self.log("  Van bovenaf gefilmd: uitsnede bepaald door de camerahoogte")
+                    radius = 0.75 * height
             self.log(f"  Rechtop gezet met {len(centers)} camerastanden")
             return rot, (mid, radius)
         self.log("  Geen cameragegevens: standaardoriëntatie gebruikt")

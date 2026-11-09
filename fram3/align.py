@@ -113,16 +113,14 @@ def gravity_rotation(centers: np.ndarray, ups: np.ndarray, fwds: np.ndarray | No
         # rolled sideways, so the image's horizontal axis stays level whatever
         # the viewing angle. 'Up' is the direction all those axes are square to.
         mean_fwd = fwds.mean(axis=0)
-        looking_down = np.mean(np.einsum("ij,ij->i", fwds, np.broadcast_to(up, fwds.shape)) < -0.6)
-        if looking_down > 0.5 or np.linalg.norm(ups.mean(axis=0)) < 0.6:
-            right = np.cross(fwds, ups)
-            right /= np.linalg.norm(right, axis=1, keepdims=True) + 1e-12
-            evals, evecs = np.linalg.eigh(right.T @ right / len(right))
-            if evals[0] < 0.2 * evals[1]:      # the axes really span a level plane
-                v = evecs[:, 0]
-                if v @ (mean_up - mean_fwd) < 0:   # cameras look down and image-up points up
-                    v = -v
-                up = v
+        right = np.cross(fwds, ups)
+        right /= np.linalg.norm(right, axis=1, keepdims=True) + 1e-12
+        evals, evecs = np.linalg.eigh(right.T @ right / len(right))
+        v = evecs[:, 0]
+        # Only when the axes really span a level plane and the cameras look
+        # along its normal, i.e. down at the object.
+        if evals[0] < 0.2 * evals[1] and abs(v @ mean_fwd) > 0.7:
+            up = -v if v @ mean_fwd > 0 else v
     return _rotation_to_z(up)
 
 
