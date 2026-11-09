@@ -141,7 +141,8 @@ async def analyze(file: UploadFile = File(...)):
 
 
 @app.post("/api/scan")
-async def start_scan(files: list[UploadFile] = File(...), preset: str = Form("normaal")):
+async def start_scan(files: list[UploadFile] = File(...), preset: str = Form("normaal"),
+                     remove_floor: bool = Form(True)):
     if preset not in PRESETS:
         _err(ValueError(f"Onbekende kwaliteit: {preset}"))
     jid = uuid.uuid4().hex[:10]
@@ -159,7 +160,7 @@ async def start_scan(files: list[UploadFile] = File(...), preset: str = Form("no
     if not paths:
         shutil.rmtree(wd, ignore_errors=True)
         _err(ValueError("Geen video's of foto's gevonden in de upload."))
-    job = Job(jid, wd, preset)
+    job = Job(jid, wd, preset, remove_floor)
     job.save()
     jobs[jid] = job
     threading.Thread(target=run_job, args=(job, paths), daemon=True).start()

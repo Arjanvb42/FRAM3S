@@ -37,7 +37,7 @@
     <aside class="sidebar left">
       <section class="panel" data-panel="scan" hidden>
         <h2>Nieuwe scan</h2>
-        <p class="hint">Film rustig rondom het object (30–90 s), of maak 20–200 foto's van alle kanten. Zorg voor goed licht en een rustige achtergrond.</p>
+        <p class="hint">Film rustig helemaal rondom het object (30–60 s), één rondje laag en één hoog, of maak 20–200 foto's van alle kanten. Gebruik de originele video: via WhatsApp wordt hij klein en wazig. Zorg voor goed licht.</p>
         <label class="dropzone" id="scan-drop">
           <input type="file" id="scan-files" multiple accept="video/*,image/*" hidden>
           <span class="dz-icon">⬆</span>
@@ -52,6 +52,7 @@
             <option value="hoog">Hoog (langzaam)</option>
           </select>
         </div>
+        <label class="toggle"><input type="checkbox" id="scan-floor" checked> Alleen het object (tafel en omgeving weghalen)</label>
         <button class="btn primary wide" id="scan-start" disabled>Scan starten</button>
         <div class="scan-progress" id="scan-progress" hidden>
           <div class="row"><strong id="scan-stage">…</strong><span id="scan-pct">0%</span></div>

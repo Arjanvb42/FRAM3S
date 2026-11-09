@@ -26,6 +26,7 @@ from typing import Callable
 
 import numpy as np
 from PIL import Image, ImageFilter
+from struct import error as struct_error
 
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".3gp"}
 PHOTO_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".heic"}
@@ -75,12 +76,14 @@ class Job:
     id: str
     workdir: Path
     preset: str = "normaal"
+    remove_floor: bool = True    # cut away the table/room around the object
     status: str = "wachtrij"     # wachtrij | bezig | klaar | fout | geannuleerd
     stage: str = ""
     progress: float = 0.0
     log: list[str] = field(default_factory=list)
     result: str | None = None    # path of result.glb
     error: str | None = None
+    warning: str | None = None
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _proc: subprocess.Popen | None = field(default=None, repr=False)
 
@@ -88,17 +91,19 @@ class Job:
         """Persist enough to list and resume this job after a restart."""
         try:
             (self.workdir / "job.json").write_text(json.dumps({
-                "id": self.id, "preset": self.preset, "status": self.status, "stage": self.stage,
-                "progress": self.progress, "error": self.error, "result": self.result}))
+                "id": self.id, "preset": self.preset, "remove_floor": self.remove_floor, "status": self.status, "stage": self.stage,
+                "progress": self.progress, "error": self.error, "warning": self.warning,
+                "result": self.result}))
         except OSError:
             pass
 
     @staticmethod
     def load(workdir: Path) -> "Job":
         info = json.loads((workdir / "job.json").read_text())
-        job = Job(info["id"], workdir, info.get("preset", "normaal"))
+        job = Job(info["id"], workdir, info.get("preset", "normaal"), info.get("remove_floor", True))
         job.status, job.stage = info.get("status", "fout"), info.get("stage", "")
         job.progress, job.error, job.result = info.get("progress", 0.0), info.get("error"), info.get("result")
+        job.warning = info.get("warning")
         if job.status in ("bezig", "wachtrij"):
             # The server stopped (laptop off, crash) while this ran.
             job.status, job.error = "onderbroken", "De scan is onderbroken. Je kunt hem hervatten."
@@ -112,7 +117,8 @@ class Job:
     def public(self) -> dict:
         return {"id": self.id, "status": self.status, "stage": self.stage,
                 "progress": round(self.progress, 3), "log": self.log[-200:],
-                "error": self.error, "has_result": self.result is not None, "preset": self.preset}
+                "error": self.error, "warning": self.warning, "has_result": self.result is not None,
+                "preset": self.preset}
 
     def cancel(self):
         self._cancel.set()
@@ -133,6 +139,7 @@ class Reconstructor:
         self.inputs = inputs
         self.tools = tools or Tools.detect()
         self.p = PRESETS.get(job.preset, PRESETS["normaal"])
+        self.remove_floor = job.remove_floor
         self.w = job.workdir
 
     # ---------------------------------------------------------------- utils
@@ -225,7 +232,27 @@ class Reconstructor:
             self.log(f"{n} beelden klaar voor reconstructie")
             self.sparse(images, sequential=self.has_video())
         mesh = self.dense_and_mesh()
-        return self.cleanup(mesh)
+        result = self.cleanup(mesh)
+        self.tidy()
+        return result
+
+    def tidy(self):
+        """Delete intermediate files once the scan is done (depth maps, frames,
+        undistorted images: several GB). Keeps the input, the textured OpenMVS
+        mesh and result.glb. FRAM3_KEEP_WORK=1 keeps everything for debugging."""
+        if os.environ.get("FRAM3_KEEP_WORK") == "1":
+            return
+        before = _du(self.w)
+        for d in list(self.w.glob("cand*")) + [self.w / "images", self.w / "dense", self.w / "sparse"]:
+            shutil.rmtree(d, ignore_errors=True)
+        (self.w / "colmap.db").unlink(missing_ok=True)
+        mvs = self.w / "mvs"
+        keep = ("scene_textured",)
+        for f in mvs.glob("*") if mvs.exists() else []:
+            if f.is_file() and not f.name.startswith(keep):
+                f.unlink(missing_ok=True)
+        after = _du(self.w)
+        self.log(f"  Tussenbestanden opgeruimd: {before / 1e9:.1f} GB → {after / 1e9:.2f} GB")
 
     def has_video(self) -> bool:
         return any(p.suffix.lower() in VIDEO_EXT for p in self.inputs)
@@ -255,6 +282,9 @@ class Reconstructor:
     def sharp_frames(self, video: Path, want: int, vi: int) -> list[Image.Image]:
         """Sample 3x more frames than needed, keep the sharpest one in each window."""
         dur = _probe_duration(video)
+        # More than ~8 frames per second of video adds near-duplicates: lots of
+        # extra work (and memory) for no extra detail.
+        want = max(10, min(want, int(math.ceil(dur * 8))))
         cand_dir = self.w / f"cand{vi}"
         cand_dir.mkdir(exist_ok=True)
         fps = max(0.5, min(30.0, (want * 3) / max(dur, 1.0)))
@@ -265,11 +295,10 @@ class Reconstructor:
         if not files:
             return []
         scores = [_sharpness(f) for f in files]
-        window = max(1, len(files) // want)
         picked = []
         median = float(np.median(scores))
-        for i in range(0, len(files), window):
-            chunk = list(range(i, min(i + window, len(files))))
+        # Exactly `want` evenly spaced windows; the sharpest frame of each wins.
+        for chunk in np.array_split(np.arange(len(files)), min(want, len(files))):
             best = max(chunk, key=lambda j: scores[j])
             if scores[best] >= 0.35 * median:  # skip windows that are all motion blur
                 picked.append(Image.open(files[best]).convert("RGB"))
@@ -289,37 +318,79 @@ class Reconstructor:
         sp = self.w / "sparse"
         sp.mkdir(exist_ok=True)
         gpu = "1" if self.tools.cuda else "0"
+        n_imgs = len(list(images.iterdir()))
+        small = max(Image.open(next(images.iterdir())).size) <= 1400
         self.stage("features")
+        extra = []
+        if small:
+            # Phone/WhatsApp video is often only ~1000 px: lower the SIFT threshold
+            # to find enough features on small, soft frames.
+            extra = ["--SiftExtraction.peak_threshold", "0.004", "--SiftExtraction.max_num_features", "12000"]
+            self.log("  Kleine beelden: gevoeligere kenmerkdetectie")
         self.colmap("feature_extractor", "--database_path", str(db), "--image_path", str(images),
                     "--ImageReader.single_camera", "1" if sequential else "0",
                     "--ImageReader.camera_model", "OPENCV",
-                    "--SiftExtraction.use_gpu", gpu,
+                    "--SiftExtraction.use_gpu", gpu, *extra,
                     on_line=self.counter("features", r"Processed file \[(\d+)/(\d+)\]"))
         self.stage("matching")
-        n_imgs = len(list(images.iterdir()))
-        if sequential and n_imgs > 60:
-            self.colmap("sequential_matcher", "--database_path", str(db),
-                        "--SequentialMatching.overlap", "15",
-                        "--SequentialMatching.loop_detection", "0",
-                        "--SiftMatching.use_gpu", gpu,
-                        on_line=self.counter("matching", r"Matching image \[(\d+)/(\d+)\]"))
-        else:
+        exhaustive = not (sequential and n_imgs > 120)
+        self.match(db, gpu, exhaustive)
+        self.stage("sparse")
+        model, registered = self.map(db, images, sp, n_imgs)
+        if registered < 0.6 * n_imgs and not exhaustive:
+            # Sequential matching misses loops and revisits; match every pair and retry.
+            self.log(f"Maar {registered} van {n_imgs} beelden geplaatst: opnieuw met alle beeldparen")
+            self.stage("matching", 0.5)
+            self.match(db, gpu, True)
+            shutil.rmtree(sp, ignore_errors=True)
+            sp.mkdir()
+            self.stage("sparse")
+            model, registered = self.map(db, images, sp, n_imgs)
+        self.registered = (registered, n_imgs)
+        if registered < max(8, 0.3 * n_imgs):
+            raise RuntimeError(
+                f"Maar {registered} van de {n_imgs} beelden konden geplaatst worden, te weinig voor een goed model. "
+                "Film rustiger en helemaal rondom het object, met genoeg licht, en gebruik de originele video "
+                "(niet via WhatsApp, die maakt hem kleiner en waziger).")
+        if registered < 0.6 * n_imgs:
+            self.job.warning = (f"Maar {registered} van de {n_imgs} beelden gebruikt: het model kan gaten hebben. "
+                                "Film voor een beter resultaat helemaal rondom het object.")
+            self.log("LET OP: " + self.job.warning)
+        self.colmap("image_undistorter", "--image_path", str(images), "--input_path", str(model),
+                    "--output_path", str(self.w / "dense"), "--output_type", "COLMAP",
+                    "--max_image_size", str(self.p["max_side"]))
+
+    def match(self, db: Path, gpu: str, exhaustive: bool):
+        if exhaustive:
             self.colmap("exhaustive_matcher", "--database_path", str(db), "--SiftMatching.use_gpu", gpu,
                         on_line=self.counter("matching", r"Matching block \[(\d+)/(\d+)"))
-        self.stage("sparse")
+        else:
+            self.colmap("sequential_matcher", "--database_path", str(db),
+                        "--SequentialMatching.overlap", "25",
+                        "--SequentialMatching.quadratic_overlap", "1",
+                        "--SiftMatching.use_gpu", gpu,
+                        on_line=self.counter("matching", r"Matching image \[(\d+)/(\d+)\]"))
+
+    def map(self, db: Path, images: Path, sp: Path, n_imgs: int) -> tuple[Path, int]:
         # "Registering image #12 (7)": the number in brackets is how many images are placed so far.
         self.colmap("mapper", "--database_path", str(db), "--image_path", str(images),
                     "--output_path", str(sp),
                     on_line=self.counter("sparse", r"Registering image #\d+ \((\d+)\)", total=n_imgs))
-        models = sorted([d for d in sp.iterdir() if d.is_dir()],
-                        key=lambda d: (d / "images.bin").stat().st_size if (d / "images.bin").exists() else 0,
-                        reverse=True)
-        if not models:
+        from .align import read_cameras
+        best, best_n = None, 0
+        for d in sp.iterdir():
+            if not d.is_dir():
+                continue
+            try:
+                n = len(read_cameras(d)[0])
+            except Exception:
+                continue
+            if n > best_n:
+                best, best_n = d, n
+        if best is None:
             raise RuntimeError("COLMAP kon geen camera-posities bepalen. Zorg voor meer overlap en textuur in de beelden.")
-        self.log(f"Model gekozen: {models[0].name} ({len(models)} deelmodel(len))")
-        self.colmap("image_undistorter", "--image_path", str(images), "--input_path", str(models[0]),
-                    "--output_path", str(self.w / "dense"), "--output_type", "COLMAP",
-                    "--max_image_size", str(self.p["max_side"]))
+        self.log(f"{best_n} van {n_imgs} beelden geplaatst (model {best.name})")
+        return best, best_n
 
     # 3. dense + mesh ---------------------------------------------------------
     def dense_and_mesh(self) -> Path:
@@ -351,7 +422,8 @@ class Reconstructor:
         self.stage("texture")
         if not (mvs / "scene_textured.obj").exists():
             self.mvs("TextureMesh", "scene_dense.mvs", "-m", "scene_mesh.ply", "-o", "scene_textured.mvs",
-                     "--export-type", "obj", "--resolution-level", str(self.p["mvs_level"]))
+                         "--export-type", "obj", "--resolution-level", str(self.p["mvs_level"]),
+                     "--empty-color", "8421504")  # unseen faces neutral grey instead of orange
         for cand in ("scene_textured.obj", "scene_textured.ply", "scene_mesh.ply"):
             if (mvs / cand).exists():
                 return mvs / cand
@@ -367,6 +439,60 @@ class Reconstructor:
         return d / "meshed.ply"
 
     # 4. cleanup ---------------------------------------------------------------
+    def gravity(self):
+        """Rotation that makes the scan upright, plus the camera orbit (centre xy,
+        radius) after that rotation. Falls back to COLMAP's default axes."""
+        import trimesh
+        from .align import gravity_rotation, look_at_point, read_poses
+        for model in (self.w / "dense" / "sparse", *sorted((self.w / "sparse").glob("*"))):
+            try:
+                centers, ups, fwds = read_poses(model)
+            except (FileNotFoundError, OSError, struct_error):
+                continue
+            if len(centers) < 3:
+                continue
+            rot = gravity_rotation(centers, ups)
+            c = trimesh.transform_points(centers, rot)
+            target = look_at_point(centers, fwds)
+            if target is not None:
+                mid = trimesh.transform_points(target[None], rot)[0, :2]
+            else:
+                mid = c[:, :2].mean(axis=0)
+            radius = float(np.median(np.linalg.norm(c[:, :2] - mid, axis=1)))
+            self.log(f"  Rechtop gezet met {len(centers)} camerastanden")
+            return rot, (mid, radius)
+        self.log("  Geen cameragegevens: standaardoriëntatie gebruikt")
+        return trimesh.transformations.rotation_matrix(-math.pi / 2, [1, 0, 0]), None
+
+    def isolate_object(self, geoms, orbit_xy, orbit_r):
+        """Remove the table and the room around the object (option remove_floor)."""
+        import trimesh
+        from .align import object_mask
+        if not self.remove_floor:
+            return
+        sizes = [len(g.faces) for g in geoms]
+        verts, faces, off = [], [], 0
+        for g in geoms:
+            verts.append(g.vertices)
+            faces.append(g.faces + off)
+            off += len(g.vertices)
+        whole = trimesh.Trimesh(np.vstack(verts), np.vstack(faces), process=False)
+        keep, info = object_mask(whole, orbit_xy, orbit_r, remove_floor=True)
+        if not keep.any():
+            self.log("  Object niet gevonden: niets weggesneden")
+            return
+        start = 0
+        for g, n in zip(geoms, sizes):
+            k = keep[start:start + n]
+            start += n
+            if not k.all() and k.any():
+                g.update_faces(k)
+                g.remove_unreferenced_vertices()
+        if info.get("floor_removed"):
+            self.log(f"  Ondergrond weggesneden ({info['floor_removed']:,} driehoeken)".replace(",", "."))
+        if info.get("outside_removed"):
+            self.log(f"  Omgeving buiten de camerakring weggesneden ({info['outside_removed']:,} driehoeken)".replace(",", "."))
+
     def cleanup(self, mesh_path: Path) -> Path:
         """Orient Z-up, drop floating debris and put the scan on the bed, keeping the texture."""
         import trimesh
@@ -377,10 +503,27 @@ class Reconstructor:
         if not geoms:
             raise RuntimeError("De reconstructie leverde een lege mesh op.")
         before = [stats(g) for g in geoms]
-        # COLMAP is Y-down/Z-forward; the editor and slicers are Z-up.
-        rot = trimesh.transformations.rotation_matrix(-math.pi / 2, [1, 0, 0])
+        rot, orbit = self.gravity()
         for g in geoms:
             g.apply_transform(rot)
+        if orbit is not None:
+            # Level exactly on the table the object stands on.
+            from .align import table_tilt
+            whole = trimesh.util.concatenate([trimesh.Trimesh(g.vertices, g.faces, process=False) for g in geoms])
+            mid, radius = orbit
+            near = np.linalg.norm(whole.triangles_center[:, :2] - mid, axis=1) < 0.8 * radius
+            if near.sum() > 100:
+                whole = whole.submesh([np.nonzero(near)[0]], append=True)
+            tilt = table_tilt(whole)
+            if not np.allclose(tilt, np.eye(4)):
+                ang = np.degrees(np.arccos(np.clip(tilt[2, 2], -1, 1)))
+                for g in geoms:
+                    g.apply_transform(tilt)
+                pts = np.array([[*mid, 0.0]])
+                orbit = (trimesh.transform_points(pts, tilt)[0, :2], radius)
+                self.log(f"  Waterpas gezet op de tafel ({ang:.1f}° bijgesteld)")
+        if orbit is not None:
+            self.isolate_object(geoms, *orbit)
         # Debris: face components much smaller than the whole scan. Masking faces
         # (instead of splitting/merging meshes) keeps UVs and the texture intact.
         lo = np.min([g.bounds[0] for g in geoms], axis=0)
@@ -436,6 +579,10 @@ def run_job(job: Job, inputs: list[Path], tools: Tools | None = None):
 
 
 # ------------------------------------------------------------------ helpers
+
+def _du(path: Path) -> int:
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
 
 def _probe_duration(video: Path) -> float:
     try:

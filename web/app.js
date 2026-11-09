@@ -650,6 +650,7 @@ $('scan-start').onclick = async () => {
   const fd = new FormData();
   scanFiles.forEach((f) => fd.append('files', f, f.name));
   fd.append('preset', $('scan-preset').value);
+  fd.append('remove_floor', $('scan-floor').checked);
   $('scan-start').disabled = true;
   $('scan-progress').hidden = false;
   $('scan-stage').textContent = 'Uploaden…';
@@ -674,7 +675,8 @@ async function loadScanHistory() {
   for (const j of list) {
     const li = document.createElement('li');
     const name = (j.files || [])[0] || j.id;
-    li.innerHTML = `<span><span class="nm"></span><span class="meta">${STATUS_NL[j.status] || j.status} · ${Math.round(j.progress * 100)}% · ${j.preset}</span></span>`;
+    li.innerHTML = `<span><span class="nm"></span><span class="meta">${STATUS_NL[j.status] || j.status}${j.warning ? ' ⚠' : ''} · ${Math.round(j.progress * 100)}% · ${j.preset}</span></span>`;
+    li.title = j.error || j.warning || '';
     li.querySelector('.nm').textContent = name + ((j.files || []).length > 1 ? ` +${j.files.length - 1}` : '');
     const btn = document.createElement('button');
     btn.className = 'btn small';
@@ -719,7 +721,8 @@ function pollScan(id) {
         const buf = await (await fetch(`/api/scan/${id}/result`)).arrayBuffer();
         switchTab('edit');
         await addGlb(buf, 'Scan');
-        toast('Scan klaar. Stel de echte afmeting rechts in (B/D/H), want een scan heeft geen vaste schaal.');
+        toast(j.warning ? `Scan klaar, maar let op: ${j.warning}`
+          : 'Scan klaar. Stel de echte afmeting rechts in (B/D/H), want een scan heeft geen vaste schaal.', !!j.warning);
         scanFiles = [];
         addScanFiles([]);
       } else if (j.status === 'fout') toast(j.error, true);
