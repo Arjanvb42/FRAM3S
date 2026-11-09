@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import os
 import shlex
 import shutil
@@ -116,6 +117,10 @@ class Reconstructor:
     def stage(self, name: str, frac: float = 0.0):
         if self.job._cancel.is_set():
             raise Cancelled()
+        self.progress(name, frac)
+
+    def progress(self, name: str, frac: float):
+        frac = max(0.0, min(1.0, frac))
         done = 0.0
         for n, weight in STAGES:
             if n == name:
@@ -126,7 +131,7 @@ class Reconstructor:
             self.job.stage = STAGE_NL[name]
             self.log(f"== {STAGE_NL[name]} ==")
 
-    def run(self, cmd: list[str], cwd: Path | None = None):
+    def run(self, cmd: list[str], cwd: Path | None = None, on_line: Callable[[str], None] | None = None):
         if self.job._cancel.is_set():
             raise Cancelled()
         self.log("$ " + " ".join(shlex.quote(c) for c in cmd))
@@ -140,6 +145,11 @@ class Reconstructor:
                 tail = (tail + [line])[-40:]
                 if len(self.job.log) < 20000:
                     self.job.log.append("  " + line[:300])
+                if on_line:
+                    try:
+                        on_line(line)
+                    except Exception:
+                        pass
         proc.wait()
         self.job._proc = None
         if self.job._cancel.is_set():
@@ -147,10 +157,24 @@ class Reconstructor:
         if proc.returncode != 0:
             raise RuntimeError(f"{Path(cmd[0]).name} faalde (code {proc.returncode}):\n" + "\n".join(tail[-10:]))
 
-    def colmap(self, *args: str):
+    def colmap(self, *args: str, on_line: Callable[[str], None] | None = None):
         if not self.tools.colmap:
             raise ToolMissing("COLMAP is niet gevonden. Draai scripts/install-reconstruction.sh.")
-        self.run(self.tools.colmap + list(args))
+        self.run(self.tools.colmap + list(args), on_line=on_line)
+
+    def counter(self, stage: str, pattern: str, total: int | None = None):
+        """Progress callback: pattern captures 'n' or 'n' and 'total' from tool output."""
+        rx = re.compile(pattern)
+
+        def cb(line: str):
+            m = rx.search(line)
+            if not m:
+                return
+            n = int(m.group(1))
+            t = int(m.group(2)) if m.lastindex and m.lastindex >= 2 else total
+            if t:
+                self.progress(stage, n / t)
+        return cb
 
     def mvs(self, tool: str, *args: str):
         self.run([str(Path(self.tools.openmvs_dir, tool))] + list(args), cwd=self.w / "mvs")
@@ -233,19 +257,24 @@ class Reconstructor:
         self.colmap("feature_extractor", "--database_path", str(db), "--image_path", str(images),
                     "--ImageReader.single_camera", "1" if sequential else "0",
                     "--ImageReader.camera_model", "OPENCV",
-                    "--SiftExtraction.use_gpu", gpu)
+                    "--SiftExtraction.use_gpu", gpu,
+                    on_line=self.counter("features", r"Processed file \[(\d+)/(\d+)\]"))
         self.stage("matching")
         n_imgs = len(list(images.iterdir()))
         if sequential and n_imgs > 60:
             self.colmap("sequential_matcher", "--database_path", str(db),
                         "--SequentialMatching.overlap", "15",
                         "--SequentialMatching.loop_detection", "0",
-                        "--SiftMatching.use_gpu", gpu)
+                        "--SiftMatching.use_gpu", gpu,
+                        on_line=self.counter("matching", r"Matching image \[(\d+)/(\d+)\]"))
         else:
-            self.colmap("exhaustive_matcher", "--database_path", str(db), "--SiftMatching.use_gpu", gpu)
+            self.colmap("exhaustive_matcher", "--database_path", str(db), "--SiftMatching.use_gpu", gpu,
+                        on_line=self.counter("matching", r"Matching block \[(\d+)/(\d+)"))
         self.stage("sparse")
+        # "Registering image #12 (7)": the number in brackets is how many images are placed so far.
         self.colmap("mapper", "--database_path", str(db), "--image_path", str(images),
-                    "--output_path", str(sp))
+                    "--output_path", str(sp),
+                    on_line=self.counter("sparse", r"Registering image #\d+ \((\d+)\)", total=n_imgs))
         models = sorted([d for d in sp.iterdir() if d.is_dir()],
                         key=lambda d: (d / "images.bin").stat().st_size if (d / "images.bin").exists() else 0,
                         reverse=True)
