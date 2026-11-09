@@ -10,6 +10,7 @@ scikit-image>=0.22
 fast-simplification>=0.1.7
 pillow>=10
 lxml>=5
+segno>=1.6
 pycollada>=0.8
 rtree>=1.2
 shapely>=2.0

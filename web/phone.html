@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#16181c">
+<title>FRAM3 scannen</title>
+<style>
+  :root { --accent: #00b3a4; --panel: #1f2329; --line: #343a44; --text: #e6e9ee; --muted: #9aa3ad; --danger: #e5534b; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #16181c; color: var(--text); font: 16px/1.4 system-ui, -apple-system, sans-serif; }
+  body { display: flex; flex-direction: column; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+  header strong { letter-spacing: .08em; }
+  .pill { font-size: 13px; padding: 4px 10px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .pill.yes { border-color: var(--accent); color: var(--accent); }
+  .view { position: relative; flex: 1; min-height: 0; background: #000; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: cover; }
+  .count { position: absolute; top: 12px; left: 12px; background: rgba(0, 0, 0, .55); padding: 6px 12px; border-radius: 10px; font-variant-numeric: tabular-nums; }
+  .count b { font-size: 22px; }
+  .tip { position: absolute; left: 12px; right: 12px; bottom: 12px; background: rgba(0, 0, 0, .55); padding: 8px 12px; border-radius: 10px; text-align: center; }
+  .flash { position: absolute; inset: 0; border: 4px solid var(--accent); opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .flash.on { opacity: 1; transition: none; }
+  footer { padding: 14px 16px; display: grid; gap: 10px; }
+  button { font: inherit; font-weight: 600; padding: 15px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--text); width: 100%; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; }
+  .msg { padding: 24px 20px; text-align: center; margin: auto; max-width: 420px; }
+  .msg p { color: var(--muted); }
+  .err { color: var(--danger); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header><strong>FRAM3</strong><span class="pill" id="lidar">Telefoon uitlezen…</span></header>
+
+<div class="msg" id="intro">
+  <h2>Scannen met je telefoon</h2>
+  <p>Zet het object op een vrije plek met goed licht. Tik op Start en loop rustig helemaal om het object heen: één rondje laag en één rondje hoog. De beelden gaan direct naar FRAM3 op je computer.</p>
+  <p class="err" id="error" hidden></p>
+</div>
+
+<div class="view" id="view" hidden>
+  <video id="video" playsinline muted autoplay></video>
+  <div class="flash" id="flash"></div>
+  <div class="count"><b id="n">0</b> beelden</div>
+  <div class="tip" id="tip">Loop rustig om het object heen</div>
+</div>
+
+<div class="msg" id="finished" hidden>
+  <h2>Klaar</h2>
+  <p><span id="total">0</span> beelden verstuurd. FRAM3 maakt er nu op je computer een 3D-model van. Je kunt deze pagina sluiten.</p>
+</div>
+
+<footer>
+  <button class="primary" id="start">Start</button>
+  <button class="primary" id="done" hidden>Klaar, maak het model</button>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const base = location.pathname.replace(/\/$/, '');
+const video = $('video');
+const MIN_FRAMES = 20;
+let stream, timer, sent = 0, maxFrames = 400, sending = false, lastSmall = null, sharpHist = [], stopped = false;
+
+function fail(text) { $('error').textContent = text; $('error').hidden = false; }
+
+async function post(path, body, type) {
+  const r = await fetch(base + path, { method: 'POST', body, headers: type ? { 'Content-Type': type } : {} });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Verbinding mislukt');
+  return r.json();
+}
+
+// What can this phone do? A browser can see which cameras exist (after you
+// allow the camera), not read the LiDAR sensor itself.
+async function describeDevice() {
+  const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput').map((d) => d.label);
+  const named = cams.some((l) => l);
+  const lidar = named ? cams.some((l) => /lidar/i.test(l)) : null;
+  const ua = navigator.userAgent;
+  const name = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? (ua.match(/Android [^;]+; ([^)]+)\)/)?.[1] || 'Android-telefoon') : 'Telefoon';
+  const el = $('lidar');
+  el.textContent = lidar === true ? 'LiDAR aanwezig' : lidar === false ? 'Geen LiDAR gevonden' : 'LiDAR onbekend';
+  el.classList.toggle('yes', lidar === true);
+  return { name, cameras: cams, lidar, width: video.videoWidth, height: video.videoHeight };
+}
+
+$('start').onclick = async () => {
+  $('start').disabled = true;
+  $('error').hidden = true;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Deze browser geeft geen toegang tot de camera. Open de pagina in Safari of Chrome.');
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } } });
+    video.srcObject = stream;
+    await video.play();
+    const hello = await post('/hello', JSON.stringify(await describeDevice()), 'application/json');
+    maxFrames = hello.max_frames || maxFrames;
+    $('intro').hidden = true; $('view').hidden = false; $('start').hidden = true; $('done').hidden = false;
+    $('done').disabled = true; $('done').textContent = `Nog minstens ${MIN_FRAMES} beelden`;
+    try { await navigator.wakeLock?.request('screen'); } catch {}
+    timer = setInterval(tick, 350);
+  } catch (e) {
+    fail(e.name === 'NotAllowedError' ? 'Geen toestemming voor de camera. Sta de camera toe en probeer opnieuw.' : e.message);
+    $('start').disabled = false;
+  }
+};
+
+const small = document.createElement('canvas'); small.width = 64; small.height = 64;
+const sctx = small.getContext('2d', { willReadFrequently: true });
+const full = document.createElement('canvas');
+
+// Look at a tiny copy of the camera image: has the view changed enough since
+// the last frame we sent, and is it sharp (not motion blur)?
+function judge() {
+  sctx.drawImage(video, 0, 0, 64, 64);
+  const d = sctx.getImageData(0, 0, 64, 64).data;
+  const g = new Float32Array(4096);
+  for (let i = 0; i < 4096; i++) g[i] = 0.3 * d[i * 4] + 0.59 * d[i * 4 + 1] + 0.11 * d[i * 4 + 2];
+  let sharp = 0;
+  for (let y = 1; y < 63; y++) for (let x = 1; x < 63; x++) {
+    const i = y * 64 + x, l = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - 64] - g[i + 64];
+    sharp += l * l;
+  }
+  let moved = 1e9;
+  if (lastSmall) { moved = 0; for (let i = 0; i < 4096; i++) moved += Math.abs(g[i] - lastSmall[i]); moved /= 4096; }
+  return { g, sharp, moved };
+}
+
+async function tick() {
+  if (sending || stopped || !video.videoWidth) return;
+  const { g, sharp, moved } = judge();
+  const sorted = [...sharpHist].sort((a, b) => a - b);
+  const median = sorted.length ? sorted[sorted.length >> 1] : 0;
+  sharpHist.push(sharp); if (sharpHist.length > 30) sharpHist.shift();
+  if (moved < 7) { $('tip').textContent = 'Loop verder om het object heen'; return; }
+  if (sharp < 0.5 * median) { $('tip').textContent = 'Iets rustiger bewegen'; return; }
+  $('tip').textContent = 'Goed zo, rustig doorlopen';
+  sending = true;
+  try {
+    full.width = video.videoWidth; full.height = video.videoHeight;
+    full.getContext('2d').drawImage(video, 0, 0);
+    const blob = await new Promise((r) => full.toBlob(r, 'image/jpeg', 0.92));
+    const res = await post('/frame', blob, 'image/jpeg');
+    lastSmall = g;
+    sent = res.frames;
+    $('n').textContent = sent;
+    $('done').disabled = sent < MIN_FRAMES;
+    $('done').textContent = sent < MIN_FRAMES ? `Nog minstens ${MIN_FRAMES - sent} beelden` : 'Klaar, maak het model';
+    $('flash').classList.add('on'); setTimeout(() => $('flash').classList.remove('on'), 60);
+    if (sent >= maxFrames) finish();
+  } catch (e) { $('tip').textContent = e.message; }
+  sending = false;
+}
+
+async function finish() {
+  if (stopped) return;
+  stopped = true;
+  clearInterval(timer);
+  stream?.getTracks().forEach((t) => t.stop());
+  try { await post('/done'); } catch {}
+  $('view').hidden = true; $('done').hidden = true; $('finished').hidden = false;
+  $('total').textContent = sent;
+}
+$('done').onclick = finish;
+</script>
+</body>
+</html>

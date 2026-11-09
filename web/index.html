@@ -44,6 +44,7 @@
           <span>Sleep video's en foto's hierheen<br><small>of klik om te kiezen</small></span>
         </label>
         <ul class="filelist" id="scan-list"></ul>
+        <button class="btn wide" id="phone-start">📱 Scannen met telefoon</button>
         <div class="field">
           <label for="scan-preset">Kwaliteit</label>
           <select id="scan-preset">
@@ -105,6 +106,19 @@
       <div class="live" id="live" hidden>
         <img id="live-frame" alt="Beeld waar de scan nu mee bezig is" hidden>
         <div class="live-cap"><span class="live-dot"></span><strong id="live-title">Scan bezig</strong><span id="live-sub"></span></div>
+      </div>
+      <div class="phone-pair" id="phone-pair" hidden>
+        <div class="phone-card">
+          <h2 id="phone-title">Scan de code met je telefoon</h2>
+          <div class="phone-qr" id="phone-qr"></div>
+          <img id="phone-frame" alt="Laatste beeld van de telefoon" hidden>
+          <p id="phone-text">Je telefoon moet op dezelfde wifi zitten als deze computer. De eerste keer waarschuwt je telefoon voor de verbinding: kies "Toon details" en ga door naar de website.</p>
+          <p class="phone-url" id="phone-url"></p>
+          <div class="phone-actions">
+            <button class="btn primary" id="phone-finish" hidden>Model maken</button>
+            <button class="btn ghost" id="phone-cancel">Stoppen</button>
+          </div>
+        </div>
       </div>
       <div class="drop-overlay" id="drop-overlay" hidden>Laat los om te openen</div>
       <div class="toast" id="toast" hidden></div>

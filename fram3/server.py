@@ -246,6 +246,70 @@ def scan_result(jid: str):
     return FileResponse(job.result, media_type="model/gltf-binary", filename=f"scan-{jid}.glb")
 
 
+# ----------------------------------------------------------- phone scanning
+@app.post("/api/phone/start")
+def phone_start():
+    from . import phone
+    try:
+        return phone.start(DATA)
+    except Exception as e:
+        _err(e)
+
+
+@app.get("/api/phone/{token}")
+def phone_status(token: str):
+    from . import phone
+    s = phone.current(token) or _err(KeyError("Koppeling verlopen"), 404)
+    return s.public()
+
+
+@app.get("/api/phone/{token}/frame/{i}")
+def phone_frame(token: str, i: int):
+    from . import live, phone
+    s = phone.current(token) or _err(KeyError("Koppeling verlopen"), 404)
+    files = s.files()
+    if not files:
+        _err(KeyError("Nog geen beelden"), 404)
+    try:
+        data = live.thumbnail(files[max(0, min(len(files) - 1, i))])
+    except Exception as e:
+        _err(e, 404)
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/phone/{token}/finish")
+def phone_finish(token: str, preset: str = Form("normaal"), remove_floor: bool = Form(True)):
+    """Turn the frames the phone sent into a scan and stop listening on the network."""
+    from . import phone
+    s = phone.current(token) or _err(KeyError("Koppeling verlopen"), 404)
+    if preset not in PRESETS:
+        _err(ValueError(f"Onbekende kwaliteit: {preset}"))
+    files = s.files()
+    if len(files) < 8:
+        _err(ValueError(f"Te weinig beelden ({len(files)}). Loop rustig rondom het object, minstens 20 beelden."))
+    jid = uuid.uuid4().hex[:10]
+    wd = JOBS_DIR / jid
+    (wd / "input").mkdir(parents=True)
+    paths = []
+    for f in files:
+        dst = wd / "input" / f"telefoon-{f.name[1:]}"
+        shutil.move(f, dst)
+        paths.append(dst)
+    phone.stop()
+    job = Job(jid, wd, preset, remove_floor)
+    job.save()
+    jobs[jid] = job
+    threading.Thread(target=run_job, args=(job, paths), daemon=True).start()
+    return job.public()
+
+
+@app.post("/api/phone/stop")
+def phone_stop():
+    from . import phone
+    phone.stop()
+    return {"ok": True}
+
+
 app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
 
 

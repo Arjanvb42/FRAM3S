@@ -733,6 +733,78 @@ function pollScan(id) {
   }, 1000);
 }
 
+// ------------------------------------------------------ scan with a phone
+// A QR code pairs a phone on the same Wi-Fi; its camera frames arrive here live.
+const phone = { token: null, timer: null, frames: -1 };
+
+$('phone-start').onclick = async () => {
+  try {
+    const r = await fetch('/api/phone/start', { method: 'POST' });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const s = await r.json();
+    phone.token = s.token;
+    phone.frames = -1;
+    $('phone-qr').innerHTML = s.qr || '';
+    $('phone-qr').hidden = false;
+    $('phone-frame').hidden = true;
+    $('phone-finish').hidden = true;
+    $('phone-title').textContent = s.qr ? 'Scan de code met je telefoon' : 'Open dit adres op je telefoon';
+    $('phone-text').textContent = 'Je telefoon moet op dezelfde wifi zitten als deze computer. De eerste keer waarschuwt je telefoon voor de verbinding: kies "Toon details" en ga door naar de website.';
+    $('phone-url').textContent = s.url;
+    $('phone-pair').hidden = false;
+    clearInterval(phone.timer);
+    phone.timer = setInterval(phonePoll, 700);
+  } catch (err) { toast(`Telefoon koppelen mislukt: ${err.message}`, true); }
+};
+
+async function phonePoll() {
+  if (!phone.token) return;
+  const r = await fetch(`/api/phone/${phone.token}`);
+  if (!r.ok) return;
+  const s = await r.json();
+  if (!s.connected) return;
+  const d = s.device;
+  $('phone-qr').hidden = true;
+  $('phone-url').textContent = '';
+  $('phone-title').textContent = `${d.name} verbonden`;
+  const lidar = d.lidar === true ? 'LiDAR aanwezig (de browser kan die nog niet uitlezen, de scan gebruikt de camera)'
+    : d.lidar === false ? 'geen LiDAR gevonden' : 'LiDAR onbekend';
+  $('phone-text').textContent = `${s.frames} beelden ontvangen · camera ${d.width}×${d.height} · ${lidar}`;
+  if (s.frames && s.frames !== phone.frames) {
+    phone.frames = s.frames;
+    $('phone-frame').src = `/api/phone/${phone.token}/frame/${s.frames - 1}?n=${s.frames}`;
+    $('phone-frame').hidden = false;
+  }
+  $('phone-finish').hidden = s.frames < 8;
+  $('phone-finish').textContent = `Model maken van ${s.frames} beelden`;
+  if (s.done) phoneFinish();
+}
+
+async function phoneFinish() {
+  const token = phone.token;
+  if (!token) return;
+  phoneClose();
+  const fd = new FormData();
+  fd.append('preset', $('scan-preset').value);
+  fd.append('remove_floor', $('scan-floor').checked);
+  try {
+    const r = await fetch(`/api/phone/${token}/finish`, { method: 'POST', body: fd });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const job = await r.json();
+    switchTab('scan');
+    $('scan-progress').hidden = false;
+    pollScan(job.id);
+  } catch (err) { toast(`Scan starten mislukt: ${err.message}`, true); fetch('/api/phone/stop', { method: 'POST' }); }
+}
+
+function phoneClose() {
+  clearInterval(phone.timer);
+  phone.token = null;
+  $('phone-pair').hidden = true;
+}
+$('phone-finish').onclick = phoneFinish;
+$('phone-cancel').onclick = () => { phoneClose(); fetch('/api/phone/stop', { method: 'POST' }); };
+
 // ------------------------------------------------------------ live view
 // While a scan runs, the viewport shows what it is doing: the frame it works
 // on, the cameras it has placed and the point cloud as it fills in.

@@ -86,6 +86,14 @@ button, input, select { font: inherit; color: inherit; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); animation: live-pulse 1.2s ease-in-out infinite; }
 @keyframes live-pulse { 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } .live img { transition: none; } }
+.phone-pair { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; background: rgba(10, 12, 15, .55); backdrop-filter: blur(3px); }
+.phone-card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px 24px; width: min(380px, 90%); text-align: center; box-shadow: 0 12px 48px rgba(0, 0, 0, .5); }
+.phone-card h2 { margin: 0 0 12px; }
+.phone-card p { color: var(--muted); font-size: 13px; margin: 10px 0; }
+.phone-qr svg { width: 220px; height: 220px; border-radius: 8px; display: block; margin: 0 auto; }
+.phone-card img { max-width: 100%; max-height: 300px; border-radius: 8px; border: 1px solid var(--line); }
+.phone-url { font-family: ui-monospace, monospace; font-size: 12px !important; word-break: break-all; user-select: all; }
+.phone-actions { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
 .drop-overlay { position: absolute; inset: 12px; border: 2px dashed var(--accent); border-radius: 14px; display: grid; place-items: center; font-size: 18px; background: rgba(0, 179, 164, .08); z-index: 5; pointer-events: none; }
 .toast { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--line); padding: 8px 14px; border-radius: var(--radius); z-index: 6; max-width: 70%; box-shadow: 0 6px 24px rgba(0, 0, 0, .4); }
 .toast.err { border-color: var(--danger); }

@@ -283,7 +283,10 @@ class Reconstructor:
         self.log(f"  Tussenbestanden opgeruimd: {before / 1e9:.1f} GB → {after / 1e9:.2f} GB")
 
     def has_video(self) -> bool:
-        return any(p.suffix.lower() in VIDEO_EXT for p in self.inputs)
+        """True when the images are one camera moving along a path: a video, or
+        frames sent live by a phone (in the order they were taken)."""
+        return (any(p.suffix.lower() in VIDEO_EXT for p in self.inputs)
+                or bool(self.inputs) and all(p.name.startswith("telefoon-") for p in self.inputs))
 
     # 1. frames ---------------------------------------------------------------
     def collect_frames(self, out: Path) -> int:
