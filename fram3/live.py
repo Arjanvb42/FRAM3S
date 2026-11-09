@@ -141,7 +141,7 @@ def build_cloud(src) -> bytes:
     if len(xyz) > MAX_POINTS:
         pick = np.random.default_rng(0).choice(len(xyz), MAX_POINTS, replace=False)
         xyz, rgb = xyz[pick], rgb[pick]
-    rot = gravity_rotation(centers, ups)
+    rot = gravity_rotation(centers, ups, fwds)
     R = rot[:3, :3]
     c = trimesh.transform_points(centers, rot)
     target = look_at_point(centers, fwds)

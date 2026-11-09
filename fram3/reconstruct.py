@@ -583,7 +583,7 @@ class Reconstructor:
                 continue
             if len(centers) < 3:
                 continue
-            rot = gravity_rotation(centers, ups)
+            rot = gravity_rotation(centers, ups, fwds)
             c = trimesh.transform_points(centers, rot)
             target = look_at_point(centers, fwds)
             if target is not None:

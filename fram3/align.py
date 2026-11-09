@@ -90,7 +90,7 @@ def look_at_point(centers: np.ndarray, fwds: np.ndarray) -> np.ndarray | None:
     return p
 
 
-def gravity_rotation(centers: np.ndarray, ups: np.ndarray) -> np.ndarray:
+def gravity_rotation(centers: np.ndarray, ups: np.ndarray, fwds: np.ndarray | None = None) -> np.ndarray:
     """4x4 rotation that turns the scan's 'up' into +Z."""
     mean_up = ups.mean(axis=0)
     mean_up /= np.linalg.norm(mean_up) or 1.0
@@ -107,6 +107,22 @@ def gravity_rotation(centers: np.ndarray, ups: np.ndarray) -> np.ndarray:
                 normal = -normal
             if normal @ mean_up > 0.5:
                 up = normal
+    if fwds is not None and len(fwds) >= 6:
+        # Filming from above, looking down: the image-up of each camera then
+        # lies almost flat and says little about gravity. But a phone is rarely
+        # rolled sideways, so the image's horizontal axis stays level whatever
+        # the viewing angle. 'Up' is the direction all those axes are square to.
+        mean_fwd = fwds.mean(axis=0)
+        looking_down = np.mean(np.einsum("ij,ij->i", fwds, np.broadcast_to(up, fwds.shape)) < -0.6)
+        if looking_down > 0.5 or np.linalg.norm(ups.mean(axis=0)) < 0.6:
+            right = np.cross(fwds, ups)
+            right /= np.linalg.norm(right, axis=1, keepdims=True) + 1e-12
+            evals, evecs = np.linalg.eigh(right.T @ right / len(right))
+            if evals[0] < 0.2 * evals[1]:      # the axes really span a level plane
+                v = evecs[:, 0]
+                if v @ (mean_up - mean_fwd) < 0:   # cameras look down and image-up points up
+                    v = -v
+                up = v
     return _rotation_to_z(up)
 
 
