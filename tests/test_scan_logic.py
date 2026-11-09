@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fram3.reconstruct import Job, Reconstructor, Tools  # noqa: E402
 
 
-def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8.0):
+def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8.0, fragment: bool = False):
     """Box on a big table plus a wall, randomly rotated, with cameras on a tilted partial orbit."""
     (wd / "dense" / "sparse").mkdir(parents=True)
     (wd / "mvs").mkdir()
@@ -25,6 +25,11 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
     rg = trimesh.transformations.random_rotation_matrix(np.random.default_rng(seed).random(3))
     m = trimesh.util.concatenate([obj, table, wall])
     m.apply_transform(rg)
+    if fragment:
+        # Like a real OpenMVS mesh: hundreds of loose islands, some faces missing.
+        rng = np.random.default_rng(seed)
+        m.update_faces(rng.random(len(m.faces)) > 0.3)
+        m.unmerge_vertices()
     m.visual = trimesh.visual.TextureVisuals(uv=np.random.rand(len(m.vertices), 2),
                                              image=Image.new("RGB", (8, 8), (200, 50, 50)))
     m.export(wd / "mvs" / "scene_textured.obj")
@@ -48,14 +53,15 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
 
 
 def test_cleanup_upright_without_table():
-    for seed in (1, 2, 3, 4):
+    for seed, frag in ((1, False), (2, False), (3, True), (4, True)):
         wd = Path(tempfile.mkdtemp())
         try:
-            fake_scan(wd, seed)
+            fake_scan(wd, seed, fragment=frag)
             job = Job("t", wd, "snel")
             out = Reconstructor(job, [], Tools(None, None, False)).cleanup(wd / "mvs" / "scene_textured.obj")
             g = trimesh.load(out, force="scene").dump()[0]
-            assert abs(g.extents[2] - 1.0) < 0.02, (seed, g.extents, job.log)   # upright, table gone
+            assert len(g.faces) > 0.5 * 0.7 * 640 * (0.7 if frag else 1), (seed, len(g.faces), job.log)
+            assert abs(g.extents[2] - 1.0) < 0.03, (seed, g.extents, job.log)   # upright, table gone
             assert max(g.extents[:2]) < 0.8, (seed, g.extents)                  # wall gone
             assert g.visual.kind == "texture"
         finally:

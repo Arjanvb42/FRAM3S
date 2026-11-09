@@ -492,6 +492,8 @@ class Reconstructor:
             self.log(f"  Ondergrond weggesneden ({info['floor_removed']:,} driehoeken)".replace(",", "."))
         if info.get("outside_removed"):
             self.log(f"  Omgeving buiten de camerakring weggesneden ({info['outside_removed']:,} driehoeken)".replace(",", "."))
+        if info.get("isolate_skipped"):
+            self.log("  Object niet duidelijk los te maken: losse delen rond het object gelaten")
 
     def cleanup(self, mesh_path: Path) -> Path:
         """Orient Z-up, drop floating debris and put the scan on the bed, keeping the texture."""
@@ -524,25 +526,34 @@ class Reconstructor:
                 self.log(f"  Waterpas gezet op de tafel ({ang:.1f}° bijgesteld)")
         if orbit is not None:
             self.isolate_object(geoms, *orbit)
-        # Debris: face components much smaller than the whole scan. Masking faces
-        # (instead of splitting/merging meshes) keeps UVs and the texture intact.
-        lo = np.min([g.bounds[0] for g in geoms], axis=0)
-        hi = np.max([g.bounds[1] for g in geoms], axis=0)
-        diag = float(np.linalg.norm(hi - lo))
+        # Debris: small clusters far from everything else. Clusters are found by
+        # 3D proximity (a scan can be many touching islands that together form
+        # the object). Masking faces keeps UVs and the texture intact.
+        from .align import proximity_labels
+        cent = np.vstack([g.triangles_center for g in geoms])
+        area = np.concatenate([g.area_faces for g in geoms])
+        diag = float(np.linalg.norm(np.ptp(cent, axis=0)))
+        labels = proximity_labels(cent, max(0.02 * diag, 3.0 * float(np.sqrt(np.median(area)))))
+        keep_all = np.ones(len(cent), dtype=bool)
         removed = 0
-        for g in geoms:
-            labels = trimesh.graph.connected_component_labels(g.face_adjacency, node_count=len(g.faces))
-            keep = np.zeros(len(g.faces), dtype=bool)
-            for lab in np.unique(labels):
-                idx = np.nonzero(labels == lab)[0]
-                pts = g.vertices[g.faces[idx].ravel()]
-                if np.linalg.norm(pts.max(0) - pts.min(0)) >= 0.08 * diag:
-                    keep[idx] = True
-                else:
-                    removed += 1
-            if keep.any() and not keep.all():
-                g.update_faces(keep)
-                g.remove_unreferenced_vertices()
+        for lab in np.unique(labels):
+            f = labels == lab
+            if np.linalg.norm(np.ptp(cent[f], axis=0)) < 0.08 * diag and area[f].sum() < 0.02 * area.sum():
+                keep_all[f] = False
+                removed += 1
+        if area[~keep_all].sum() > 0.3 * area.sum():
+            # Mostly small pieces: that is the object itself in a fragmented scan.
+            keep_all[:] = True
+            removed = 0
+        if keep_all.any() and not keep_all.all():
+            start = 0
+            for g in geoms:
+                k = keep_all[start:start + len(g.faces)]
+                start += len(g.faces)
+                if k.any() and not k.all():
+                    g.update_faces(k)
+                    g.remove_unreferenced_vertices()
+            geoms[:] = [g for g in geoms if len(g.faces)]
         if removed:
             self.log(f"  Losse stukjes verwijderd ({removed} weg)")
         lo = np.min([g.bounds[0] for g in geoms], axis=0)

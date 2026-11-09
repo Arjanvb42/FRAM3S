@@ -110,6 +110,23 @@ def gravity_rotation(centers: np.ndarray, ups: np.ndarray) -> np.ndarray:
     return _rotation_to_z(up)
 
 
+def proximity_labels(points: np.ndarray, cell: float) -> np.ndarray:
+    """Cluster points that lie within about one `cell` of each other
+    (26-connected occupied voxels). Returns a label per point."""
+    from scipy import ndimage
+    if len(points) == 0:
+        return np.zeros(0, dtype=int)
+    lo = points.min(0)
+    span = np.ptp(points, axis=0)
+    cell = max(cell, float(span.max()) / 400, 1e-12)   # cap the grid size
+    ijk = np.floor((points - lo) / cell).astype(np.int64)
+    dims = ijk.max(0) + 1
+    grid = np.zeros(dims, dtype=bool)
+    grid[tuple(ijk.T)] = True
+    lab, _ = ndimage.label(grid, structure=np.ones((3, 3, 3), dtype=bool))
+    return lab[tuple(ijk.T)]
+
+
 def table_tilt(mesh, max_angle_deg: float = 25.0) -> np.ndarray:
     """Small rotation that makes the table plane exactly horizontal.
 
@@ -178,7 +195,7 @@ def object_mask(mesh, orbit_center_xy: np.ndarray, orbit_radius: float,
 
     # 2. The table: the height that holds the most horizontal surface area.
     if remove_floor:
-        horiz = (np.abs(normals[:, 2]) > 0.85) & keep
+        horiz = (normals[:, 2] > 0.85) & keep   # the surface it stands on faces up
         if horiz.sum() > 50:
             z = centers[horiz, 2]
             lo, hi = np.percentile(centers[keep, 2], [1, 99])
@@ -194,31 +211,39 @@ def object_mask(mesh, orbit_center_xy: np.ndarray, orbit_radius: float,
                 keep &= ~below
                 info["floor_z"] = float(floor_z)
 
-    # 3. Of what is left, keep the part that sits in the middle (the object)
+    # 3. Of what is left, keep the cluster that sits in the middle (the object)
     #    and anything touching its footprint; drop leftover table edges.
-    if keep.any():
-        sub = mesh.submesh([np.nonzero(keep)[0]], append=True)
-        idx_map = np.nonzero(keep)[0]
-        labels = trimesh.graph.connected_component_labels(sub.face_adjacency, node_count=len(sub.faces))
+    #    Scans are often hundreds of disconnected islands, so group by 3D
+    #    proximity, not by mesh connectivity.
+    before = int(keep.sum())
+    if before:
+        idx = np.nonzero(keep)[0]
+        pts = centers[idx]
+        diag = float(np.linalg.norm(np.ptp(pts, axis=0)))
+        # cell: 3% of the size, but never smaller than a few triangles across
+        cell = max(0.03 * diag, 3.0 * float(np.sqrt(np.median(areas[idx]))))
+        labels = proximity_labels(pts, cell)
         best, best_score = None, -1.0
         for lab in np.unique(labels):
-            f = np.nonzero(labels == lab)[0]
-            c = sub.triangles_center[f]
-            d = np.linalg.norm(c[:, :2].mean(0) - orbit_center_xy)
-            score = sub.area_faces[f].sum() / (1.0 + d / max(orbit_radius, 1e-9) * 4)
+            f = labels == lab
+            d = np.linalg.norm(pts[f, :2].mean(0) - orbit_center_xy)
+            score = areas[idx[f]].sum() / (1.0 + d / max(orbit_radius, 1e-9) * 4)
             if score > best_score:
                 best, best_score = lab, score
-        main = sub.triangles_center[labels == best]
+        main = pts[labels == best]
         bmin, bmax = main.min(0), main.max(0)
         pad = 0.1 * (bmax - bmin)
         bmin, bmax = bmin - pad, bmax + pad
         final = np.zeros(len(mesh.faces), dtype=bool)
         for lab in np.unique(labels):
-            f = np.nonzero(labels == lab)[0]
-            c = sub.triangles_center[f]
-            cmin, cmax = c.min(0), c.max(0)
+            f = labels == lab
+            cmin, cmax = pts[f].min(0), pts[f].max(0)
             if np.all(cmax >= bmin) and np.all(cmin <= bmax):
-                final[idx_map[f]] = True
-        info["parts_kept"] = int(final.sum())
-        keep = final
+                final[idx[f]] = True
+        # Guard: never throw away most of what is inside the camera circle.
+        if areas[final].sum() < 0.25 * areas[keep].sum():
+            info["isolate_skipped"] = True
+        else:
+            info["parts_kept"] = int(final.sum())
+            keep = final
     return keep, info
