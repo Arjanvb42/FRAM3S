@@ -216,9 +216,29 @@ def test_live_view_reads_growing_scan():
         shutil.rmtree(wd)
 
 
+def test_heavy_mesh_is_simplified_before_texturing():
+    wd = Path(tempfile.mkdtemp())
+    try:
+        m = trimesh.creation.icosphere(6)   # 81,920 faces
+        m.export(wd / "scene_mesh.ply")
+        assert R._ply_face_count(wd / "scene_mesh.ply") == len(m.faces)
+        job = Job("s", wd, "snel")
+        r = Reconstructor(job, [], Tools(None, str(wd), False))   # no TextureMesh here: file is simplified
+        assert r.simplify_for_texture(wd / "scene_mesh.ply") == []
+        assert R._ply_face_count(wd / "scene_mesh.ply") == len(m.faces)   # under the limit: untouched
+        r.p = dict(r.p, max_faces=20000)
+        assert r.simplify_for_texture(wd / "scene_mesh.ply") == []
+        n = R._ply_face_count(wd / "scene_mesh.ply")
+        assert 15000 < n <= 21000, n
+        assert any("vereenvoudigd" in l for l in job.log)
+    finally:
+        shutil.rmtree(wd)
+
+
 if __name__ == "__main__":
     test_cleanup_upright_without_table()
     test_low_registration_fails_clearly()
     test_gpu_out_of_memory_falls_back_to_cpu()
     test_live_view_reads_growing_scan()
+    test_heavy_mesh_is_simplified_before_texturing()
     print("ok")

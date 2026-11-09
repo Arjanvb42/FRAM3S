@@ -33,9 +33,11 @@ PHOTO_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".heic"}
 
 PRESETS = {
     # max image side, target frame count, OpenMVS resolution level (0 = full)
-    "snel":   {"max_side": 1600, "frames": 80,  "mvs_level": 2},
-    "normaal": {"max_side": 2400, "frames": 150, "mvs_level": 1},
-    "hoog":   {"max_side": 3200, "frames": 250, "mvs_level": 0},
+    # max_faces: the mesh is simplified to this before texturing. Fur and other
+    # fine structure give millions of faces, on which texturing never finishes.
+    "snel":   {"max_side": 1600, "frames": 80,  "mvs_level": 2, "max_faces": 300_000},
+    "normaal": {"max_side": 2400, "frames": 150, "mvs_level": 1, "max_faces": 800_000},
+    "hoog":   {"max_side": 3200, "frames": 250, "mvs_level": 0, "max_faces": 1_500_000},
 }
 
 
@@ -527,12 +529,36 @@ class Reconstructor:
         self.stage("texture")
         if not (mvs / "scene_textured.obj").exists():
             self.mvs("TextureMesh", "scene_dense.mvs", "-m", "scene_mesh.ply", "-o", "scene_textured.mvs",
-                         "--export-type", "obj", "--resolution-level", str(self.p["mvs_level"]),
-                     "--empty-color", "8421504")  # unseen faces neutral grey instead of orange
+                     "--export-type", "obj", "--resolution-level", str(self.p["mvs_level"]),
+                     "--empty-color", "8421504",  # unseen faces neutral grey instead of orange
+                     *self.simplify_for_texture(mvs / "scene_mesh.ply"))
         for cand in ("scene_textured.obj", "scene_textured.ply", "scene_mesh.ply"):
             if (mvs / cand).exists():
                 return mvs / cand
         raise RuntimeError("OpenMVS leverde geen mesh op.")
+
+    def simplify_for_texture(self, mesh: Path) -> list[str]:
+        """Extra TextureMesh arguments that bring a too-heavy mesh down to the
+        preset's face limit (or simplify the file itself if this OpenMVS cannot)."""
+        faces, cap = _ply_face_count(mesh), self.p["max_faces"]
+        if faces <= cap:
+            return []
+        ratio = cap / faces
+        self.log(f"  Mesh heeft {faces:,} vlakken: vereenvoudigd naar ongeveer {cap:,} voor de textuur".replace(",", "."))
+        try:
+            out = subprocess.run([str(Path(self.tools.openmvs_dir, "TextureMesh")), "-h"],
+                                 capture_output=True, text=True)
+            if "--decimate" in out.stdout + out.stderr:
+                return ["--decimate", f"{ratio:.4f}"]
+        except Exception:
+            pass
+        import fast_simplification
+        import trimesh
+        m = trimesh.load(mesh, process=False)
+        v, f = fast_simplification.simplify(m.vertices, m.faces, target_count=cap)
+        mesh.rename(mesh.with_name("scene_mesh_full.ply"))
+        trimesh.Trimesh(v, f, process=False).export(mesh)
+        return []
 
     def _colmap_dense(self) -> Path:
         d = self.w / "dense"
@@ -741,6 +767,20 @@ def _has_filter(name: str) -> bool:
 
 def _has_decoder(codec: str) -> bool:
     return any(len(l.split()) > 1 and l.split()[1] == codec for l in _ff_list("decoders").splitlines())
+
+
+def _ply_face_count(path: Path) -> int:
+    try:
+        with path.open("rb") as f:
+            for _ in range(60):
+                line = f.readline()
+                if line.startswith(b"element face"):
+                    return int(line.split()[2])
+                if not line or line.startswith(b"end_header"):
+                    break
+    except (OSError, ValueError):
+        pass
+    return 0
 
 
 def _gpu_mem_mib() -> int:
