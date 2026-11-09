@@ -240,13 +240,19 @@ def object_mask(mesh, orbit_center_xy: np.ndarray, orbit_radius: float,
         plane = table_plane(sub)
         if plane is not None:
             nrm, off, thick = plane
-            zs = centers[keep, 2]
-            lo, hi = np.percentile(zs, [1, 99])
+            d = centers @ nrm - off
+            above = keep & (d > 0)
+            lo, hi = np.percentile(centers[above, 2], [1, 99]) if above.sum() > 10 else (0.0, 0.0)
             height = hi - lo
-            floor_z = off / nrm[2] if abs(nrm[0]) + abs(nrm[1]) < 0.2 else None
-            if floor_z is not None and floor_z < lo + 0.5 * height:
-                tol = max(0.015 * height, 2.5 * thick)
-                d = centers @ nrm - off
+            # It is the table under the object when there is real surface
+            # standing on it near the middle of the orbit. (Do not require the
+            # plane to be low: junk under a table can make it look high.)
+            mid = np.linalg.norm(centers[:, :2] - orbit_center_xy, axis=1) < 0.4 * orbit_radius
+            tol = max(0.015 * height, 2.5 * thick)
+            on_top = above & mid & (d > tol)
+            flat_enough = abs(nrm[0]) + abs(nrm[1]) < 0.2
+            if flat_enough and areas[on_top].sum() > 0.03 * areas[keep].sum():
+                floor_z = off / nrm[2]
                 below = d < tol
                 info["floor_removed"] = int((below & keep).sum())
                 keep &= ~below

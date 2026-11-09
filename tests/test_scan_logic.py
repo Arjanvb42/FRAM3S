@@ -25,7 +25,10 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
     wall = trimesh.creation.box((6, 0.1, 3))
     wall.apply_translation((0, 5, 1.5))
     rg = trimesh.transformations.random_rotation_matrix(np.random.default_rng(seed).random(3))
-    m = trimesh.util.concatenate([obj, table, wall])
+    # junk under the table edge (table leg / background sheet), deeper than the object is tall
+    slab = trimesh.creation.box((3, 0.1, 3)).subdivide().subdivide().subdivide()
+    slab.apply_translation((0, 1.6, -1.6))
+    m = trimesh.util.concatenate([obj, table, wall, slab])
     m.apply_transform(rg)
     if fragment:
         # Like a real OpenMVS mesh: hundreds of loose islands, some faces missing.
