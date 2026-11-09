@@ -127,7 +127,7 @@ def proximity_labels(points: np.ndarray, cell: float) -> np.ndarray:
     return lab[tuple(ijk.T)]
 
 
-def table_plane(mesh, max_angle_deg: float = 30.0, iters: int = 300):
+def table_plane(mesh, max_angle_deg: float = 45.0, iters: int = 300):
     """Find the table the object stands on: the plane, roughly facing up, that
     carries the most surface area. Fitted on face positions (RANSAC + least
     squares), because the normals of a scanned table are noisy.
@@ -139,7 +139,9 @@ def table_plane(mesh, max_angle_deg: float = 30.0, iters: int = 300):
     a = mesh.area_faces
     c = mesh.triangles_center
     total = a.sum()
-    cand = np.nonzero(n[:, 2] > np.cos(np.radians(max_angle_deg + 10)))[0]
+    # People tilt the phone a lot around low objects: camera 'up' can be 30+
+    # degrees off, so accept planes up to 45 degrees from it.
+    cand = np.nonzero(n[:, 2] > np.cos(np.radians(min(max_angle_deg + 10, 80))))[0]
     if len(cand) < 50:
         return None
     diag = float(np.linalg.norm(np.ptp(c, axis=0)))
@@ -184,7 +186,7 @@ def table_plane(mesh, max_angle_deg: float = 30.0, iters: int = 300):
     return nrm, off, thickness
 
 
-def table_tilt(mesh, max_angle_deg: float = 30.0) -> np.ndarray:
+def table_tilt(mesh, max_angle_deg: float = 45.0) -> np.ndarray:
     """Small rotation that makes the table plane exactly horizontal.
 
     Camera-based 'up' is only roughly right (people tilt the phone), the table

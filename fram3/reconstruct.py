@@ -237,7 +237,7 @@ class Reconstructor:
             self.log("Hervatten: frames en camera's zijn al klaar")
         else:
             shutil.rmtree(images, ignore_errors=True)
-            for d in ("sparse", "dense"):
+            for d in ("sparse", "dense", "cameras"):
                 shutil.rmtree(self.w / d, ignore_errors=True)
             (self.w / "colmap.db").unlink(missing_ok=True)
             images.mkdir(parents=True, exist_ok=True)
@@ -258,6 +258,11 @@ class Reconstructor:
         if os.environ.get("FRAM3_KEEP_WORK") == "1":
             return
         before = _du(self.w)
+        # Keep the camera model (under 1 MB): cleanup needs it to set a scan
+        # upright, so a finished scan can always be cleaned again.
+        cams = self.w / "cameras"
+        if (self.w / "dense" / "sparse").is_dir() and not cams.exists():
+            shutil.copytree(self.w / "dense" / "sparse", cams)
         for d in list(self.w.glob("cand*")) + [self.w / "images", self.w / "dense", self.w / "sparse"]:
             shutil.rmtree(d, ignore_errors=True)
         (self.w / "colmap.db").unlink(missing_ok=True)
@@ -471,7 +476,8 @@ class Reconstructor:
         radius) after that rotation. Falls back to COLMAP's default axes."""
         import trimesh
         from .align import gravity_rotation, look_at_point, read_poses
-        for model in (self.w / "dense" / "sparse", *sorted((self.w / "sparse").glob("*"))):
+        for model in (self.w / "dense" / "sparse", self.w / "cameras",
+                      *sorted((self.w / "sparse").glob("*"), key=lambda d: -_du(d))):
             try:
                 centers, ups, fwds = read_poses(model)
             except (FileNotFoundError, OSError, struct_error):

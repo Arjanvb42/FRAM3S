@@ -64,7 +64,7 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
 
 
 def test_cleanup_upright_without_table():
-    for seed, frag, tilt in ((1, False, 8), (2, False, 21), (3, True, 8), (4, True, 21)):
+    for seed, frag, tilt in ((1, False, 8), (2, False, 21), (3, True, 8), (4, True, 21), (5, True, 35)):
         wd = Path(tempfile.mkdtemp())
         try:
             fake_scan(wd, seed, fragment=frag, tilt_deg=tilt)
