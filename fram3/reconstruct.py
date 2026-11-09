@@ -239,6 +239,10 @@ class Reconstructor:
             shutil.rmtree(images, ignore_errors=True)
             for d in ("sparse", "dense", "cameras"):
                 shutil.rmtree(self.w / d, ignore_errors=True)
+            # New cameras mean a new coordinate frame: an old mesh would not fit.
+            for f in (self.w / "mvs").glob("*") if (self.w / "mvs").is_dir() else []:
+                if f.is_file():
+                    f.unlink()
             (self.w / "colmap.db").unlink(missing_ok=True)
             images.mkdir(parents=True, exist_ok=True)
             n = self.collect_frames(images)

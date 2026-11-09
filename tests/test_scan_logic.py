@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fram3.reconstruct import Job, Reconstructor, Tools  # noqa: E402
 
 
-def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8.0, fragment: bool = False):
+def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8.0, fragment: bool = False,
+              sheet: bool = False):
     """Box on a big table plus a wall, randomly rotated, with cameras on a tilted partial orbit."""
     (wd / "dense" / "sparse").mkdir(parents=True)
     (wd / "mvs").mkdir()
@@ -34,7 +35,16 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
         sp.apply_translation((0.1 * i, 0.0, 0.03))
     # and a long thin sliver from under the base up the side (seen on a real scan)
     sliver = trimesh.Trimesh([[0.2, 0.3, 0.3], [0.21, 0.3, 0.3], [0.2, 0.31, -0.3]], [[0, 1, 2]])
-    m = trimesh.util.concatenate([obj, table, wall, slab, *specks, sliver])
+    parts = [obj, table, wall, slab, *specks, sliver]
+    aim = np.array([0, 0, 0.5])
+    if sheet:
+        # a rippled notepad lying next to the object, where the cameras aim
+        pad = trimesh.creation.box((1.6, 1.6, 0.04)).subdivide().subdivide().subdivide().subdivide()
+        pad.vertices[:, 2] += 0.08 * np.sin(pad.vertices[:, 0] * 6) * np.cos(pad.vertices[:, 1] * 5) + 0.1
+        pad.apply_translation((1.4, 0, 0))
+        parts.append(pad)
+        aim = np.array([1.0, 0, 0.5])
+    m = trimesh.util.concatenate(parts)
     m.apply_transform(rg)
     if fragment:
         # Like a real OpenMVS mesh: hundreds of loose islands, some faces missing.
@@ -47,8 +57,8 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
     T = trimesh.transformations.rotation_matrix(np.radians(tilt_deg), [1, 0, 0])[:3, :3]
     lines = []
     for i, a in enumerate(np.linspace(0, arc, 24)):
-        C = T @ np.array([2.5 * np.cos(a), 2.5 * np.sin(a), 0.7]) + [0, 0, 0.5]
-        f = np.array([0, 0, 0.5]) - C
+        C = T @ np.array([2.5 * np.cos(a), 2.5 * np.sin(a), 0.7]) + aim
+        f = aim - C
         f /= np.linalg.norm(f)
         x = np.cross(f, T @ [0, 0, 1])
         x /= np.linalg.norm(x)
@@ -64,10 +74,12 @@ def fake_scan(wd: Path, seed: int, arc: float = 1.5 * np.pi, tilt_deg: float = 8
 
 
 def test_cleanup_upright_without_table():
-    for seed, frag, tilt in ((1, False, 8), (2, False, 21), (3, True, 8), (4, True, 21), (5, True, 35)):
+    cases = ((1, False, 8, False), (2, False, 21, False), (3, True, 8, False), (4, True, 21, False),
+             (5, True, 35, False), (6, False, 30, True), (7, True, 30, True))
+    for seed, frag, tilt, sheet in cases:
         wd = Path(tempfile.mkdtemp())
         try:
-            fake_scan(wd, seed, fragment=frag, tilt_deg=tilt)
+            fake_scan(wd, seed, fragment=frag, tilt_deg=tilt, sheet=sheet)
             job = Job("t", wd, "snel")
             out = Reconstructor(job, [], Tools(None, None, False)).cleanup(wd / "mvs" / "scene_textured.obj")
             g = trimesh.load(out, force="scene").dump()[0]

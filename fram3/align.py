@@ -272,22 +272,38 @@ def object_mask(mesh, orbit_center_xy: np.ndarray, orbit_radius: float,
         # cell: 3% of the size, but never smaller than a few triangles across
         cell = max(0.03 * diag, 3.0 * float(np.sqrt(np.median(areas[idx]))))
         labels = proximity_labels(pts, cell)
+        # The object is the tall, compact lump; leftover table (rippled paper,
+        # a cloth) is wide and low, even when it lies nearer the orbit centre,
+        # which hand-held filming does not pin down well.
+        floor = info.get("floor_z")
         best, best_score = None, -1.0
         for lab in np.unique(labels):
             f = labels == lab
-            d = np.linalg.norm(pts[f, :2].mean(0) - orbit_center_xy)
-            score = areas[idx[f]].sum() / (1.0 + d / max(orbit_radius, 1e-9) * 4)
+            p = pts[f]
+            if len(p) < 3:
+                continue
+            z_lo, z_hi = np.percentile(p[:, 2], [2, 98])
+            height = max(z_hi - (floor if floor is not None else z_lo), 1e-9)
+            foot = float(np.linalg.norm(np.percentile(p[:, :2], 98, axis=0) - np.percentile(p[:, :2], 2, axis=0)))
+            compact = min(height / max(foot, 1e-9), 2.0)
+            d = np.linalg.norm(p[:, :2].mean(0) - orbit_center_xy)
+            score = height * compact * np.sqrt(areas[idx[f]].sum()) / (1.0 + 2.0 * d / max(orbit_radius, 1e-9))
             if score > best_score:
                 best, best_score = lab, score
+        if best is None:
+            best = labels[0]
         main = pts[labels == best]
         bmin, bmax = main.min(0), main.max(0)
         pad = 0.1 * (bmax - bmin)
         bmin, bmax = bmin - pad, bmax + pad
         final = np.zeros(len(mesh.faces), dtype=bool)
+        inside_box = np.all((pts >= bmin) & (pts <= bmax), axis=1)
         for lab in np.unique(labels):
             f = labels == lab
-            cmin, cmax = pts[f].min(0), pts[f].max(0)
-            if np.all(cmax >= bmin) and np.all(cmin <= bmax):
+            # keep parts that mostly lie within the object's box (a loose
+            # handle, a separate lid), not a sheet that only pokes into it
+            a_all = areas[idx[f]].sum()
+            if lab == best or areas[idx[f & inside_box]].sum() >= 0.5 * a_all:
                 final[idx[f]] = True
         # Guard: never throw away most of what is inside the camera circle.
         if areas[final].sum() < 0.25 * areas[keep].sum():
