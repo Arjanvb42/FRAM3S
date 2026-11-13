@@ -33,6 +33,7 @@ Het script bouwt beide tools met CUDA als de NVIDIA-driver en de CUDA-toolkit aa
 - FRAM3 kiest uit elke video de scherpste frames, berekent de cameraposities (COLMAP) en maakt daarna een dichte puntenwolk, een mesh en een textuur (OpenMVS).
 - Losse stukjes worden verwijderd en het model komt op het bed in de editor.
 - Een scan heeft geen vaste schaal. Stel daarom de echte maat in bij Afmeting (B/D/H).
+- **Drone-beelden** herkent FRAM3 zelf aan de GPS: in drone-foto's (EXIF) of in het .SRT-bestand naast een DJI-video (zet "Video-ondertitels" aan op de drone en sleep het .SRT-bestand mee). FRAM3 kiest dan frames per gevlogen meter, koppelt alleen beelden die dicht bij elkaar genomen zijn, en zet de scan in echte meters rechtop. Het model komt op een gangbare schaal op het bed (bijvoorbeeld 1:100); de echte maat staat in het logboek.
 
 **Bewerken**
 - Basisvormen: kubus, cilinder, bol, kegel, piramide, torus, wig, buis en halve bol. Klik erop of sleep ze naar het bed.
@@ -62,6 +63,7 @@ Intern rekent FRAM3 net als slicers in Z-up en millimeters.
 fram3/formats.py      import/export van alle formaten
 fram3/repair.py       opschonen, waterdicht maken, exacte booleans (manifold3d)
 fram3/reconstruct.py  scanpipeline: frames → COLMAP → OpenMVS → opschonen
+fram3/drone.py        drone-beelden: GPS uit foto's en DJI-SRT, koppelen op positie, echte maat
 fram3/server.py       lokale server (FastAPI) + API
 web/                  editor (three.js, zonder build-stap)
 scripts/              installatie van de scantools

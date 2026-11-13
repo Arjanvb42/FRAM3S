@@ -629,7 +629,7 @@ let scanPoll = null;
 const scanDrop = $('scan-drop');
 scanDrop.addEventListener('dragover', (e) => { e.preventDefault(); scanDrop.classList.add('over'); });
 scanDrop.addEventListener('dragleave', () => scanDrop.classList.remove('over'));
-scanDrop.addEventListener('drop', (e) => { e.preventDefault(); scanDrop.classList.remove('over'); addScanFiles([...e.dataTransfer.files].filter(isMedia)); });
+scanDrop.addEventListener('drop', (e) => { e.preventDefault(); scanDrop.classList.remove('over'); addScanFiles([...e.dataTransfer.files].filter((f) => isMedia(f) || /\.srt$/i.test(f.name))); });
 $('scan-files').onchange = (e) => { addScanFiles([...e.target.files]); e.target.value = ''; };
 
 function addScanFiles(files) {
