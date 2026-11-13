@@ -151,7 +151,8 @@ async def start_scan(files: list[UploadFile] = File(...), preset: str = Form("no
     paths = []
     for f in files:
         name = Path(f.filename or "file").name
-        if Path(name).suffix.lower() not in VIDEO_EXT | PHOTO_EXT:
+        # .srt: DJI flight data (GPS) that belongs to a drone video
+        if Path(name).suffix.lower() not in VIDEO_EXT | PHOTO_EXT | {".srt"}:
             continue
         dst = wd / "input" / name
         with dst.open("wb") as out:

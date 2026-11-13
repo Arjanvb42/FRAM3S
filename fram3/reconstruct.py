@@ -242,15 +242,23 @@ class Reconstructor:
             self.log("Hervatten: frames en camera's zijn al klaar")
         else:
             shutil.rmtree(images, ignore_errors=True)
-            for d in ("sparse", "dense", "cameras", "snap"):
+            for d in ("sparse", "dense", "cameras", "snap", "sparse_geo"):
                 shutil.rmtree(self.w / d, ignore_errors=True)
+            for f in ("geo.json", "geo_ref.txt", "geo_aligned", "pairs.txt"):
+                (self.w / f).unlink(missing_ok=True)
             # New cameras mean a new coordinate frame: an old mesh would not fit.
             for f in (self.w / "mvs").glob("*") if (self.w / "mvs").is_dir() else []:
                 if f.is_file():
                     f.unlink()
             (self.w / "colmap.db").unlink(missing_ok=True)
             images.mkdir(parents=True, exist_ok=True)
-            n = self.collect_frames(images)
+            from . import drone
+            geo = drone.plan(self)
+            if geo:
+                self.log("Drone-beelden met GPS herkend: echte maat, koppelen op positie, frames per gevlogen meter")
+                n = drone.collect_frames(self, images, geo)
+            else:
+                n = self.collect_frames(images)
             if n < 8:
                 raise RuntimeError(f"Te weinig bruikbare beelden ({n}). Film rustig rondom het object, minstens 20 beelden.")
             self.log(f"{n} beelden klaar voor reconstructie")
@@ -318,9 +326,29 @@ class Reconstructor:
         # More than ~8 frames per second of video adds near-duplicates: lots of
         # extra work (and memory) for no extra detail.
         want = max(10, min(want, int(math.ceil(dur * 8))))
+        files, _fps = self.frame_candidates(video, want, vi)
+        if not files:
+            return
+        scores = [_sharpness(f) for f in files]
+        n = 0
+        median = float(np.median(scores))
+        # Exactly `want` evenly spaced windows; the sharpest frame of each wins.
+        # Frames are handed out one at a time: 250 frames of 4K do not fit in memory.
+        for chunk in np.array_split(np.arange(len(files)), min(want, len(files))):
+            best = max(chunk, key=lambda j: scores[j])
+            if scores[best] >= 0.35 * median:  # skip windows that are all motion blur
+                n += 1
+                with Image.open(files[best]) as im:
+                    yield im.convert("RGB")
+        self.log(f"{video.name}: {len(files)} kandidaten, {n} scherpe frames gekozen")
+
+    def frame_candidates(self, video: Path, want: int, vi: int, density: int = 3) -> tuple[list[Path], float]:
+        """Extract `density` x `want` evenly timed candidate frames (scaled, HDR
+        converted). Returns the files and the sampling rate in frames per second."""
+        dur = _probe_duration(video)
         cand_dir = self.w / f"cand{vi}"
         cand_dir.mkdir(exist_ok=True)
-        fps = max(0.5, min(30.0, (want * 3) / max(dur, 1.0)))
+        fps = max(0.5, min(30.0, (want * density) / max(dur, 1.0)))
         ms = self.p["max_side"]
         # Cap the longest side (phone videos are often portrait).
         vf = [f"fps={fps:.4f}",
@@ -346,21 +374,7 @@ class Reconstructor:
                     f"Deze ffmpeg kan {codec.upper()}-video niet lezen ({video.name}). "
                     "Op Fedora los je dat op met: sudo dnf swap ffmpeg-free ffmpeg --allowerasing")
             raise
-        files = sorted(cand_dir.glob("c*.jpg"))
-        if not files:
-            return
-        scores = [_sharpness(f) for f in files]
-        n = 0
-        median = float(np.median(scores))
-        # Exactly `want` evenly spaced windows; the sharpest frame of each wins.
-        # Frames are handed out one at a time: 250 frames of 4K do not fit in memory.
-        for chunk in np.array_split(np.arange(len(files)), min(want, len(files))):
-            best = max(chunk, key=lambda j: scores[j])
-            if scores[best] >= 0.35 * median:  # skip windows that are all motion blur
-                n += 1
-                with Image.open(files[best]) as im:
-                    yield im.convert("RGB")
-        self.log(f"{video.name}: {len(files)} kandidaten, {n} scherpe frames gekozen")
+        return sorted(cand_dir.glob("c*.jpg")), fps
 
     def save_image(self, img: Image.Image, dst: Path):
         ms = self.p["max_side"]
@@ -376,6 +390,8 @@ class Reconstructor:
         sp.mkdir(exist_ok=True)
         gpu = "1" if self.tools.cuda else "0"
         n_imgs = len(list(images.iterdir()))
+        from . import drone
+        geo = drone.load(self.w)   # drone footage: image positions from GPS
         small = max(Image.open(next(images.iterdir())).size) <= 1400
         self.stage("features")
         extra = []
@@ -386,7 +402,7 @@ class Reconstructor:
             self.log("  Kleine beelden: gevoeligere kenmerkdetectie")
         def extract(use_gpu: str, more: list[str]):
             self.colmap("feature_extractor", "--database_path", str(db), "--image_path", str(images),
-                        "--ImageReader.single_camera", "1" if sequential else "0",
+                        "--ImageReader.single_camera", "1" if sequential or geo else "0",
                         "--ImageReader.camera_model", "OPENCV",
                         "--SiftExtraction.use_gpu", use_gpu, *extra, *more,
                         on_line=self.counter("features", r"Processed file \[(\d+)/(\d+)\]"))
@@ -413,7 +429,17 @@ class Reconstructor:
                                "Zijn ze scherp en goed belicht?")
         self.stage("matching")
         exhaustive = not (sequential and n_imgs > 120)
-        self.match(db, gpu, exhaustive)
+        matched = False
+        if geo and n_imgs > 60:
+            try:
+                drone.match(self, db, gpu)
+                matched, exhaustive = True, False
+            except Cancelled:
+                raise
+            except Exception as e:
+                self.log(f"  Koppelen op GPS lukte niet ({str(e)[:80]}): gewone koppeling")
+        if not matched:
+            self.match(db, gpu, exhaustive)
         self.stage("sparse")
         model, registered = self.map(db, images, sp, n_imgs)
         if registered < 0.6 * n_imgs and not exhaustive:
@@ -446,6 +472,8 @@ class Reconstructor:
             self.job.warning = (f"Maar {registered} van de {n_imgs} beelden gebruikt: het model kan gaten hebben. "
                                 "Film voor een beter resultaat helemaal rondom het object.")
             self.log("LET OP: " + self.job.warning)
+        if geo:
+            model = drone.align(self, model)
         self.colmap("image_undistorter", "--image_path", str(images), "--input_path", str(model),
                     "--output_path", str(self.w / "dense"), "--output_type", "COLMAP",
                     "--max_image_size", str(self.p["max_side"]))
@@ -583,7 +611,9 @@ class Reconstructor:
                 continue
             if len(centers) < 3:
                 continue
-            rot = gravity_rotation(centers, ups, fwds)
+            from . import drone
+            # GPS-aligned drone scans are already Z-up.
+            rot = np.eye(4) if drone.aligned(self.w) else gravity_rotation(centers, ups, fwds)
             c = trimesh.transform_points(centers, rot)
             target = look_at_point(centers, fwds)
             if target is not None:
@@ -646,10 +676,12 @@ class Reconstructor:
         if not geoms:
             raise RuntimeError("De reconstructie leverde een lege mesh op.")
         before = [stats(g) for g in geoms]
+        from . import drone
+        geo = drone.aligned(self.w)
         rot, orbit = self.gravity()
         for g in geoms:
             g.apply_transform(rot)
-        if orbit is not None:
+        if orbit is not None and not geo:   # GPS already knows where "up" is
             # Level exactly on the table the object stands on.
             from .align import table_tilt
             whole = trimesh.util.concatenate([trimesh.Trimesh(g.vertices, g.faces, process=False) for g in geoms])
@@ -719,6 +751,15 @@ class Reconstructor:
             geoms[:] = [g for g in geoms if len(g.faces)]
             lo = np.min([g.bounds[0] for g in geoms], axis=0)
             hi = np.max([g.bounds[1] for g in geoms], axis=0)
+        if geo:
+            # Metres -> a model on a common scale that fits the bed (in mm).
+            n = drone.print_scale(hi - lo)
+            sz = hi - lo
+            for g in geoms:
+                g.apply_scale(1000.0 / n)
+            lo, hi = lo * 1000.0 / n, hi * 1000.0 / n
+            self.log(f"  Echte maat {sz[0]:.1f} × {sz[1]:.1f} × {sz[2]:.1f} m, op schaal 1:{n} gezet "
+                     f"({hi[0] - lo[0]:.0f} × {hi[1] - lo[1]:.0f} × {hi[2] - lo[2]:.0f} mm)")
         shift = [-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]]
         for g in geoms:
             g.apply_translation(shift)
